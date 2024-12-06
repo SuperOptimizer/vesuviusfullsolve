@@ -4,19 +4,6 @@ from pathlib import Path
 import subprocess
 
 
-# Match the C struct definition exactly
-class HeapNode(ctypes.Structure):
-    _fields_ = [
-        ("d", ctypes.c_float),
-        ("k", ctypes.c_uint32),
-        ("x", ctypes.c_uint16),
-        ("y", ctypes.c_uint16),
-        ("z", ctypes.c_uint16),
-        ("pad", ctypes.c_uint16)
-    ]
-
-
-SUPERPIXEL_MAX_NEIGHS = 56 * 2
 
 
 class Superpixel(ctypes.Structure):
@@ -26,10 +13,6 @@ class Superpixel(ctypes.Structure):
         ("z", ctypes.c_float),
         ("c", ctypes.c_float),
         ("n", ctypes.c_uint32),
-        ("nlow", ctypes.c_uint32),
-        ("nmid", ctypes.c_uint32),
-        ("nhig", ctypes.c_uint32),
-        ("neighs", ctypes.c_uint32 * SUPERPIXEL_MAX_NEIGHS)
     ]
 
 
@@ -48,7 +31,7 @@ def compile_snic():
     return lib_path
 
 
-def run_snic(volume, d_seed, compactness=40.0, lowmid=0.3, midhig=0.7):
+def run_snic(volume, d_seed, compactness=40.0):
     """
     Run SNIC superpixel segmentation on a 3D volume.
 
@@ -91,12 +74,10 @@ def run_snic(volume, d_seed, compactness=40.0, lowmid=0.3, midhig=0.7):
         ctypes.c_int,  # lx
         ctypes.c_int,  # d_seed
         ctypes.c_float,  # compactness
-        ctypes.c_float,  # lowmid
-        ctypes.c_float,  # midhig
         np.ctypeslib.ndpointer(dtype=np.uint32),  # labels
         ctypes.POINTER(Superpixel)  # superpixels
     ]
-    lib.snic.restype = ctypes.c_int
+    lib.snic.restype = None  # Function now returns void
 
     # Prepare output arrays
     labels = np.zeros(volume.shape, dtype=np.uint32)
@@ -104,13 +85,9 @@ def run_snic(volume, d_seed, compactness=40.0, lowmid=0.3, midhig=0.7):
     superpixels = (Superpixel * max_superpixels)()
 
     # Run SNIC
-    neigh_overflow = lib.snic(
-        volume, lz, ly, lx, d_seed, compactness,
-        lowmid, midhig, labels, superpixels
+    lib.snic(
+        volume, lz, ly, lx, d_seed, compactness, labels, superpixels
     )
-
-    if neigh_overflow > 0:
-        print(f"Warning: {neigh_overflow} neighbor relationships exceeded storage capacity")
 
     return labels, superpixels
 

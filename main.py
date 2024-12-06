@@ -172,8 +172,6 @@ def process_chunk(chunk_path, output_path=None):
         processed,
         d_seed=4,  # Controls number of superpixels
         compactness=1.0,  # Spatial regularization
-        lowmid=0.3,  # Low-mid intensity threshold
-        midhig=0.7  # Mid-high intensity threshold
     )
 
     print(f"SNIC completed in {time.time() - start_time:.2f} seconds")

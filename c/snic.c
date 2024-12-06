@@ -8,10 +8,9 @@
 #include <time.h>
 
 typedef struct HeapNode {
-  float d;
+  __fp16 d;
   unsigned int k;
-  unsigned short x, y, z;
-  unsigned short pad;
+  unsigned char x, y, z;
 } HeapNode;
 
 #define heap_node_val(n) (-n.d)
@@ -29,7 +28,6 @@ static inline void heap_free(Heap *heap) {
   free(heap->nodes);
 }
 
-// Optimized heap push using direct comparisons
 static inline void heap_push(Heap *heap, HeapNode node) {
   int i = ++heap->len;
   HeapNode* nodes = heap->nodes;
@@ -42,7 +40,6 @@ static inline void heap_push(Heap *heap, HeapNode node) {
   nodes[i] = node;
 }
 
-// Optimized heap pop using direct comparisons
 static inline HeapNode heap_pop(Heap *heap) {
   HeapNode* nodes = heap->nodes;
   HeapNode result = nodes[1];
@@ -60,32 +57,16 @@ static inline HeapNode heap_pop(Heap *heap) {
   return result;
 }
 
-#define SUPERPIXEL_MAX_NEIGHS (56*2)
 typedef struct Superpixel {
   float x, y, z, c;
-  unsigned int n, nlow, nmid, nhig;
-  unsigned int neighs[SUPERPIXEL_MAX_NEIGHS];
+  unsigned int n;
 } Superpixel;
-
-// Optimized neighbor addition using early exit
-static inline int superpixel_add_neighbors(Superpixel *superpixels, unsigned int k1, unsigned int k2) {
-  unsigned int* neighs = superpixels[k1].neighs;
-  for(int i = 0; i < SUPERPIXEL_MAX_NEIGHS; i++) {
-    if(neighs[i] == k2) return 0;
-    if(neighs[i] == 0) {
-      neighs[i] = k2;
-      return 0;
-    }
-  }
-  return 1;
-}
 
 static inline int snic_superpixel_count(int lx, int ly, int lz, int d_seed) {
   return (lx/d_seed) * (ly/d_seed) * (lz/d_seed);
 }
 
-int snic(float *img, int lz, int ly, int lx, int d_seed, float compactness, float lowmid, float midhig, unsigned int *labels, Superpixel* superpixels) {
-  int neigh_overflow = 0;
+void snic(float *img, int lz, int ly, int lx, int d_seed, float compactness, float lowmid, float midhig, unsigned int *labels, Superpixel* superpixels) {
   int lylx = ly * lx;
   int img_size = lylx * lz;
 
@@ -115,11 +96,11 @@ int snic(float *img, int lz, int ly, int lx, int d_seed, float compactness, floa
   }
 
   float invwt = (compactness*compactness*numk)/(float)(img_size);
-  const float scale = 100.0f;  // Pre-define scale constant
+  const float scale = 100.0f;
 
   while (pq.len > 0) {
     HeapNode n = heap_pop(&pq);
-    int i = n.z*lylx + n.x*ly + n.y;  // Inline index calculation
+    int i = n.z*lylx + n.x*ly + n.y;
     if (labels[i] > 0) continue;
 
     unsigned int k = n.k;
@@ -131,11 +112,6 @@ int snic(float *img, int lz, int ly, int lx, int d_seed, float compactness, floa
     sp->y += n.y;
     sp->z += n.z;
     sp->n++;
-
-    // Branchless counting using comparison results
-    sp->nlow += (img_val <= lowmid);
-    sp->nmid += (img_val > lowmid && img_val <= midhig);
-    sp->nhig += (img_val > midhig);
 
     float ksize = (float)sp->n;
     float c_over_ksize = sp->c/ksize;
@@ -179,10 +155,6 @@ int snic(float *img, int lz, int ly, int lx, int d_seed, float compactness, floa
               .z = (unsigned short)zz
             });
           }
-          else if(k != labels[ii]) {
-            neigh_overflow += superpixel_add_neighbors(superpixels, k, labels[ii]) +
-                            superpixel_add_neighbors(superpixels, labels[ii], k);
-          }
         }
       }
     }
@@ -198,5 +170,4 @@ int snic(float *img, int lz, int ly, int lx, int d_seed, float compactness, floa
   }
 
   heap_free(&pq);
-  return neigh_overflow;
 }
