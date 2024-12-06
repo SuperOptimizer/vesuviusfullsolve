@@ -1,0 +1,6 @@
+zarr
+wget
+scikit-image
+numpy
+numba
+opencv-python
