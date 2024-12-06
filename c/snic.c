@@ -66,6 +66,33 @@ static inline int snic_superpixel_count(int lx, int ly, int lz, int d_seed) {
   return (lx/d_seed) * (ly/d_seed) * (lz/d_seed);
 }
 
+#define DEFINE_OFFSET(z, y, x) ((z) * lylx + (x) * ly + (y))
+
+#define PROCESS_NEIGHBOR(zoff, yoff, xoff) do { \
+  const int zz = n.z + (zoff); \
+  const int yy = n.y + (yoff); \
+  const int xx = n.x + (xoff); \
+  if (zz >= 0 && zz < lz && \
+      yy >= 0 && yy < ly && \
+      xx >= 0 && xx < lx) { \
+    const int ii = DEFINE_OFFSET(zz, yy, xx); \
+    if (labels[ii] <= 0) { \
+      const float dc = scale * (c_over_ksize - img[ii]); \
+      const float dx = x_over_ksize - xx; \
+      const float dy = y_over_ksize - yy; \
+      const float dz = z_over_ksize - zz; \
+      const float d = (dc*dc + (dx*dx + dy*dy + dz*dz)*invwt) / ksize; \
+      heap_push(&pq, (HeapNode){ \
+        .d = d, \
+        .k = k, \
+        .x = (unsigned short)xx, \
+        .y = (unsigned short)yy, \
+        .z = (unsigned short)zz \
+      }); \
+    } \
+  } \
+} while(0)
+
 void snic(float *img, int lz, int ly, int lx, int d_seed, float compactness, float lowmid, float midhig, unsigned int *labels, Superpixel* superpixels) {
   int lylx = ly * lx;
   int img_size = lylx * lz;
@@ -98,67 +125,35 @@ void snic(float *img, int lz, int ly, int lx, int d_seed, float compactness, flo
   float invwt = (compactness*compactness*numk)/(float)(img_size);
   const float scale = 100.0f;
 
-  while (pq.len > 0) {
-    HeapNode n = heap_pop(&pq);
-    int i = n.z*lylx + n.x*ly + n.y;
-    if (labels[i] > 0) continue;
+while (pq.len > 0) {
+  HeapNode n = heap_pop(&pq);
+  const int i = n.z*lylx + n.x*ly + n.y;
+  if (labels[i] > 0) continue;
 
-    unsigned int k = n.k;
-    labels[i] = k;
-    Superpixel* sp = &superpixels[k];
-    float img_val = img[i];
-    sp->c += img_val;
-    sp->x += n.x;
-    sp->y += n.y;
-    sp->z += n.z;
-    sp->n++;
+  const unsigned int k = n.k;
+  labels[i] = k;
+  Superpixel* sp = &superpixels[k];
+  const float img_val = img[i];
+  sp->c += img_val;
+  sp->x += n.x;
+  sp->y += n.y;
+  sp->z += n.z;
+  sp->n++;
 
-    float ksize = (float)sp->n;
-    float c_over_ksize = sp->c/ksize;
-    float x_over_ksize = sp->x/ksize;
-    float y_over_ksize = sp->y/ksize;
-    float z_over_ksize = sp->z/ksize;
+  const float ksize = (float)sp->n;
+  const float c_over_ksize = sp->c/ksize;
+  const float x_over_ksize = sp->x/ksize;
+  const float y_over_ksize = sp->y/ksize;
+  const float z_over_ksize = sp->z/ksize;
 
-    // Process 3x3x3 neighborhood with optimized bounds checking
-    int zmin = (n.z > 0) ? -1 : 0;
-    int zmax = (n.z < lz-1) ? 1 : 0;
-    int ymin = (n.y > 0) ? -1 : 0;
-    int ymax = (n.y < ly-1) ? 1 : 0;
-    int xmin = (n.x > 0) ? -1 : 0;
-    int xmax = (n.x < lx-1) ? 1 : 0;
-
-    for(int dz = zmin; dz <= zmax; dz++) {
-      int zz = n.z + dz;
-      int z_offset = zz * lylx;
-
-      for(int dy = ymin; dy <= ymax; dy++) {
-        int yy = n.y + dy;
-
-        for(int dx = xmin; dx <= xmax; dx++) {
-          if(dx == 0 && dy == 0 && dz == 0) continue;
-
-          int xx = n.x + dx;
-          int ii = z_offset + xx*ly + yy;
-
-          if(labels[ii] <= 0) {
-            float dc = scale * (c_over_ksize - img[ii]);
-            float dx = x_over_ksize - xx;
-            float dy = y_over_ksize - yy;
-            float dz = z_over_ksize - zz;
-            float d = (dc*dc + (dx*dx + dy*dy + dz*dz)*invwt) / ksize;
-
-            heap_push(&pq, (HeapNode){
-              .d = d,
-              .k = k,
-              .x = (unsigned short)xx,
-              .y = (unsigned short)yy,
-              .z = (unsigned short)zz
-            });
-          }
-        }
-      }
-    }
-  }
+  // Process 6 direct neighbors: front, back, left, right, up, down
+  PROCESS_NEIGHBOR(-1,  0,  0);  // back
+  PROCESS_NEIGHBOR( 1,  0,  0);  // front
+  PROCESS_NEIGHBOR( 0, -1,  0);  // left
+  PROCESS_NEIGHBOR( 0,  1,  0);  // right
+  PROCESS_NEIGHBOR( 0,  0, -1);  // down
+  PROCESS_NEIGHBOR( 0,  0,  1);  // up
+}
 
   // Final averaging
   for (unsigned int k = 1; k <= numk; k++) {

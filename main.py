@@ -143,7 +143,7 @@ def process_chunk(chunk_path, output_path=None):
     scroll1 = zarr.open(chunk_path, mode="r")
 
     # Read and process fixed size chunk (256³)
-    chunk = scroll1[4096:4096 + 128, 2048:2048 + 128, 2048:2048 + 128]
+    chunk = scroll1[4096:4096 + 256, 2048:2048 + 256, 2048:2048 + 256]
 
     print("Processing volume...")
     # Convert to uint8 and normalize
@@ -170,7 +170,7 @@ def process_chunk(chunk_path, output_path=None):
     # Run SNIC
     labels, superpixels = snic.run_snic(
         processed,
-        d_seed=4,  # Controls number of superpixels
+        d_seed=2,  # Controls number of superpixels
         compactness=1.0,  # Spatial regularization
     )
 
