@@ -1,4 +1,3 @@
-
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -13,7 +12,7 @@
 #define D_SEED 2
 #define VOLUME_DIM 256
 #define VOLUME_SLICE (VOLUME_DIM * VOLUME_DIM)
-#define ZERO_SUPERPIXEL_INDEX 0  // Reserved index for zero-valued pixels
+#define ZERO_SUPERVOXEL_INDEX 0  // Reserved index for zero-valued voxels
 
 typedef struct HeapNode {
     unsigned int k;
@@ -28,6 +27,10 @@ typedef struct Heap {
     HeapNode* nodes;
 } Heap;
 
+typedef struct Supervoxel {
+    float x, y, z, c;  // Keep as float for accumulation and averaging
+    unsigned int n;
+} Supervoxel;
 
 static inline Heap heap_alloc(int size) {
     size_t alloc_size = (size_t)size * sizeof(HeapNode);
@@ -63,7 +66,6 @@ static inline void heap_free(Heap *heap) {
     }
 }
 
-
 static inline void heap_push(Heap *heap, HeapNode node) {
     int i = ++heap->len;
     HeapNode* nodes = heap->nodes;
@@ -93,35 +95,26 @@ static inline HeapNode heap_pop(Heap *heap) {
     return result;
 }
 
-typedef struct Superpixel {
-    float x, y, z, c;  // Keep as float for accumulation and averaging
-    unsigned int n;
-} Superpixel;
 
-static inline int snic_superpixel_count() {
+
+static inline int snic_supervoxel_count() {
     return (256/D_SEED) * (256/D_SEED) * (256/D_SEED);
 }
 
-// Pre-process to assign zero values to zero superpixel
-static void assign_zero_values(uint8_t *img, unsigned int *labels, Superpixel* superpixels, int img_size) {
-    // Initialize zero superpixel
-    superpixels[ZERO_SUPERPIXEL_INDEX] = (Superpixel){0};
+// Pre-process to initialize zero supervoxel
+static void init_zero_supervoxel(uint8_t *img, Supervoxel* supervoxels, int img_size) {
+    // Initialize zero supervoxel
+    supervoxels[ZERO_SUPERVOXEL_INDEX] = (Supervoxel){0};
 
-    // First initialize all labels to -1 (unassigned)
-    for (int i = 0; i < img_size; i++) {
-        labels[i] = -1;
-    }
-
-    // Then assign zero labels to zero-valued voxels
+    // Collect zero-valued voxels
     for (int i = 0; i < img_size; i++) {
         if (img[i] == 0) {
-            labels[i] = ZERO_SUPERPIXEL_INDEX;  // Using 0 as the label for zero pixels
-            Superpixel* sp = &superpixels[ZERO_SUPERPIXEL_INDEX];
-            sp->c += 0;
-            sp->x += (i / VOLUME_DIM) % VOLUME_DIM;
-            sp->y += i % VOLUME_DIM;
-            sp->z += i / VOLUME_SLICE;
-            sp->n++;
+            Supervoxel* sv = &supervoxels[ZERO_SUPERVOXEL_INDEX];
+            sv->c += 0;
+            sv->x += (i / VOLUME_DIM) % VOLUME_DIM;
+            sv->y += i % VOLUME_DIM;
+            sv->z += i / VOLUME_SLICE;
+            sv->n++;
         }
     }
 }
@@ -160,7 +153,7 @@ static inline float calculate_local_density(uint8_t* img, int x, int y, int z, i
 }
 
 static inline int should_create_seed(uint8_t* img, int x, int y, int z, float base_spacing, float local_density) {
-    // Skip if current position is a zero-valued pixel
+    // Skip if current position is a zero-valued voxel
     int idx = (z * VOLUME_SLICE) + (x * VOLUME_DIM) + y;
     if(img[idx] == 0) return 0;
 
@@ -180,11 +173,11 @@ static inline int should_create_seed(uint8_t* img, int x, int y, int z, float ba
             fabs(rel_z - round(rel_z)) < threshold);
 }
 
-int snic(uint8_t *img, unsigned int *labels, Superpixel* superpixels) {
+int supervoxeler(uint8_t *img, Supervoxel* supervoxels) {
     int img_size = VOLUME_DIM * VOLUME_DIM * VOLUME_DIM;
 
-    // First assign all zero values to zero superpixel and initialize other labels to -1
-    assign_zero_values(img, labels, superpixels, img_size);
+    // Initialize zero supervoxel
+    init_zero_supervoxel(img, supervoxels, img_size);
 
     // Base spacing for initial uniform grid
     float base_spacing = (float)D_SEED;
@@ -192,15 +185,27 @@ int snic(uint8_t *img, unsigned int *labels, Superpixel* superpixels) {
     Heap pq = heap_alloc(img_size*16);
     unsigned int numk = 0;
 
+    // Create boolean array to track visited voxels
+    uint8_t* visited = (uint8_t*)calloc(img_size, sizeof(uint8_t));
+    if (!visited) {
+        heap_free(&pq);
+        return -1;
+    }
+
+    // Mark zero voxels as visited
+    for (int i = 0; i < img_size; i++) {
+        if (img[i] == 0) {
+            visited[i] = 1;
+        }
+    }
+
     // Modified seeding loop with adaptive density
     for(int z = 0; z < VOLUME_DIM; z++) {
         for(int y = 0; y < VOLUME_DIM; y++) {
             for(int x = 0; x < VOLUME_DIM; x++) {
-                // Skip positions that are already assigned to zero superpixel
                 int idx = (z * VOLUME_SLICE) + (x * VOLUME_DIM) + y;
-                if (img[idx] == 0) continue;  // Skip zero voxels for seed placement
+                if (visited[idx]) continue;
 
-                // Calculate local density using a window
                 float local_density = calculate_local_density(img, x, y, z, D_SEED);
 
                 if(should_create_seed(img, x, y, z, base_spacing, local_density)) {
@@ -224,25 +229,23 @@ int snic(uint8_t *img, unsigned int *labels, Superpixel* superpixels) {
         HeapNode n = heap_pop(&pq);
         int i = ((int)n.z * VOLUME_SLICE) + ((int)n.x * VOLUME_DIM) + n.y;
 
-        // Skip if already labeled or if it's a zero voxel
-        if (labels[i] != -1) continue;  // This includes zero superpixel assignments
-        if (img[i] == 0) continue;      // Double-check to ensure we never process zero voxels
+        if (visited[i]) continue;
+        visited[i] = 1;
 
         unsigned int k = n.k;
-        labels[i] = k;
-        Superpixel* sp = &superpixels[k];
+        Supervoxel* sv = &supervoxels[k];
         float img_val = (float)img[i];
-        sp->c += img_val;
-        sp->x += n.x;
-        sp->y += n.y;
-        sp->z += n.z;
-        sp->n++;
+        sv->c += img_val;
+        sv->x += n.x;
+        sv->y += n.y;
+        sv->z += n.z;
+        sv->n++;
 
-        float ksize = (float)sp->n;
-        float c_over_ksize = sp->c/ksize;
-        float x_over_ksize = sp->x/ksize;
-        float y_over_ksize = sp->y/ksize;
-        float z_over_ksize = sp->z/ksize;
+        float ksize = (float)sv->n;
+        float c_over_ksize = sv->c/ksize;
+        float x_over_ksize = sv->x/ksize;
+        float y_over_ksize = sv->y/ksize;
+        float z_over_ksize = sv->z/ksize;
 
         for(int neighbor = 0; neighbor < 6; neighbor++) {
             static const int8_t offsets[6][3] = {
@@ -259,42 +262,39 @@ int snic(uint8_t *img, unsigned int *labels, Superpixel* superpixels) {
 
             int ii = (zz * VOLUME_SLICE) + (xx * VOLUME_DIM) + yy;
 
-            // Skip zero voxels when processing neighbors
-            if (img[ii] == 0) continue;
+            if (visited[ii]) continue;
 
-            // Only process unassigned voxels (not zero superpixel or other assignments)
-            if(labels[ii] == -1) {
-                float dc = scale * (c_over_ksize - (float)img[ii]);
-                float dx = x_over_ksize - xx;
-                float dy = y_over_ksize - yy;
-                float dz = z_over_ksize - zz;
+            float dc = scale * (c_over_ksize - (float)img[ii]);
+            float dx = x_over_ksize - xx;
+            float dy = y_over_ksize - yy;
+            float dz = z_over_ksize - zz;
 
-                float intensity_factor = (float)img[ii] / MAX_INTENSITY;
-                float spatial_distance = (dx*dx + dy*dy + dz*dz);
-                float d = (dc*dc + spatial_distance*invwt*(1.0f + intensity_factor*intensity_weight)) / ksize;
+            float intensity_factor = (float)img[ii] / MAX_INTENSITY;
+            float spatial_distance = (dx*dx + dy*dy + dz*dz);
+            float d = (dc*dc + spatial_distance*invwt*(1.0f + intensity_factor*intensity_weight)) / ksize;
 
-                heap_push(&pq, (HeapNode){
-                    .d = d,
-                    .k = k,
-                    .x = (uint8_t)xx,
-                    .y = (uint8_t)yy,
-                    .z = (uint8_t)zz
-                });
-            }
+            heap_push(&pq, (HeapNode){
+                .d = d,
+                .k = k,
+                .x = (uint8_t)xx,
+                .y = (uint8_t)yy,
+                .z = (uint8_t)zz
+            });
         }
     }
 
     // Final averaging
     for (unsigned int k = 0; k <= numk; k++) {
-        float ksize = (float)superpixels[k].n;
+        float ksize = (float)supervoxels[k].n;
         if (ksize > 0) {
-            superpixels[k].c /= ksize;
-            superpixels[k].x /= ksize;
-            superpixels[k].y /= ksize;
-            superpixels[k].z /= ksize;
+            supervoxels[k].c /= ksize;
+            supervoxels[k].x /= ksize;
+            supervoxels[k].y /= ksize;
+            supervoxels[k].z /= ksize;
         }
     }
 
+    free(visited);
     heap_free(&pq);
-    return 0;
+    return numk;
 }

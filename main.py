@@ -4,13 +4,12 @@ import matplotlib.cm as cm
 import zarr
 import numpy as np
 import pipeline
-import snic
 import sys
 from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QSlider
 from PyQt5.QtCore import Qt
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 import time
-import snic
+import supervoxeler
 from pathlib import Path
 
 
@@ -217,50 +216,37 @@ def process_chunk(chunk_path, output_path=None, chunk_coords=(4096, 4096, 4096),
     processed = np.ascontiguousarray(chunk)
 
     processed = pipeline.apply_glcae_3d(processed)
-    processed[processed < 32] = 0
+    processed[processed < 96] = 0
+    #processed[processed > 128+64] = 255
     print("Running SNIC...")
     start_time = time.time()
 
     # Run SNIC with fixed parameters for chunk
-    labels, superpixels = snic.run_snic(processed)
+    supervoxels, num_supervoxels = supervoxeler.run_supervoxeler(processed)
 
     print(f"SNIC completed in {time.time() - start_time:.2f} seconds")
 
     # Extract features and adjust for chunk coordinates
     centroids = [
         (sp.z + z_start, sp.y + y_start, sp.x + x_start)  # Note: changed order to match chunk coords
-        for sp in superpixels[1:]
+        for sp in supervoxels[1:]
         if sp.n > 0  # Filter out empty superpixels
     ]
-    values = np.array([sp.c for sp in superpixels[1:] if sp.n > 0])
+    values = np.array([sp.c for sp in supervoxels[1:] if sp.n > 0])
 
     # Calculate and print statistics
     print(f"Generated {len(centroids)} superpixels")
     print(f"Average intensity: {values.mean():.2f}")
     print(f"Intensity std: {values.std():.2f}")
-
-    # Optionally save results
-    if output_path:
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(
-            output_path,
-            labels=labels,
-            centroids=centroids,
-            values=values,
-            chunk_coords=chunk_coords,
-            chunk_size=chunk_size,
-            processing_time=time.time() - start_time
-        )
-
     return centroids, values
 
 
 
 if __name__ == "__main__":
     # Set up paths
-    SCROLL_PATH = Path(
-        "/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll1/PHercParis4.volpkg/volumes_zarr_standardized/54keV_7.91um_Scroll1A.zarr/0")
+    #SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll1/PHercParis4.volpkg/volumes_zarr_standardized/54keV_7.91um_Scroll1A.zarr/0")
+    SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/0")
+
     OUTPUT_DIR = Path("output")
 
     # Ensure output directory exists
@@ -269,7 +255,7 @@ if __name__ == "__main__":
     # Compile SNIC
     print("Compiling SNIC...")
     try:
-        snic.compile_snic()
+        supervoxeler.compile_supervoxeler()
     except Exception as e:
         print(f"Error compiling SNIC: {e}")
         raise
