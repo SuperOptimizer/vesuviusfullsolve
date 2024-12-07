@@ -2,6 +2,10 @@ import numpy as np
 import ctypes
 from pathlib import Path
 import subprocess
+
+D_SEED=2
+
+
 class Superpixel(ctypes.Structure):
     _fields_ = [
         ("x", ctypes.c_uint8),
@@ -11,7 +15,7 @@ class Superpixel(ctypes.Structure):
         ("n", ctypes.c_uint32),
     ]
 
-def run_snic(volume, d_seed, iso_threshold=0):
+def run_snic(volume, iso_threshold=0):
     """
     Run SNIC superpixel segmentation on a 3D volume with intensity threshold.
 
@@ -19,8 +23,6 @@ def run_snic(volume, d_seed, iso_threshold=0):
     -----------
     volume : ndarray
         Input 3D volume as uint8 with values in [0,255]
-    d_seed : int
-        Seed spacing (controls number of superpixels)
     iso_threshold : int
         Intensity threshold (0-255). Superpixels with average intensity below this are filtered out
 
@@ -48,7 +50,6 @@ def run_snic(volume, d_seed, iso_threshold=0):
     # Configure function signature
     lib.snic.argtypes = [
         np.ctypeslib.ndpointer(dtype=np.uint8),
-        ctypes.c_int,
         np.ctypeslib.ndpointer(dtype=np.uint32),
         ctypes.POINTER(Superpixel),
         ctypes.c_uint8
@@ -57,11 +58,11 @@ def run_snic(volume, d_seed, iso_threshold=0):
 
     # Prepare output arrays
     labels = np.zeros(volume.shape, dtype=np.uint32)
-    max_superpixels = snic_superpixel_count(d_seed) + 1
+    max_superpixels = snic_superpixel_count(D_SEED) + 1
     superpixels = (Superpixel * max_superpixels)()
 
     # Run SNIC with iso threshold and get number of superpixels
-    num_superpixels = lib.snic(volume, d_seed, labels, superpixels, iso_threshold)
+    num_superpixels = lib.snic(volume, labels, superpixels, iso_threshold)
 
     return labels, superpixels, num_superpixels
 

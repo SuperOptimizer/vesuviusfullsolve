@@ -213,7 +213,6 @@ def process_chunk(chunk_path, output_path=None):
     # Run SNIC with fixed parameters for 256³ volume
     labels, superpixels, num_superpixels = snic.run_snic(
         processed,
-        d_seed=2,
         iso_threshold= 32
     )
 

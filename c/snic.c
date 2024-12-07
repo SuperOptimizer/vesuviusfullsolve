@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <time.h>
 
+#define D_SEED 2
 #define DIMENSION 256
 #define DIMENSION_SHIFT 8  // 2^8 = 256
 #define LY_LX (DIMENSION * DIMENSION)
@@ -69,7 +70,7 @@ static inline HeapNode heap_pop(Heap *heap) {
 }
 
 static inline int snic_superpixel_count(int d_seed) {
-    return (DIMENSION/d_seed) * (DIMENSION/d_seed) * (DIMENSION/d_seed);
+    return (DIMENSION/D_SEED) * (DIMENSION/D_SEED) * (DIMENSION/D_SEED);
 }
 
 #define DEFINE_OFFSET(z, y, x) (((z) << (DIMENSION_SHIFT * 2)) | ((x) << DIMENSION_SHIFT) | (y))
@@ -99,20 +100,18 @@ static inline int snic_superpixel_count(int d_seed) {
     } \
 } while(0)
 
-unsigned int snic(unsigned char *img, int d_seed, float compactness, unsigned int *labels, Superpixel* superpixels, unsigned char iso_threshold) {
-    float spacing = (float)DIMENSION / (float)(DIMENSION/d_seed);
+unsigned int snic(unsigned char *img, float compactness, unsigned int *labels, Superpixel* superpixels, unsigned char iso_threshold) {
+    float spacing = (float)DIMENSION / (float)(DIMENSION/D_SEED);
     Heap pq = heap_alloc(IMG_SIZE*16);
-    unsigned int numk = 0;
+    const unsigned int numk = snic_superpixel_count(D_SEED);
 
-    // Initialize labels to -1 (unassigned)
     for (int i = 0; i < IMG_SIZE; i++) {
         labels[i] = 0;
     }
 
-    // Initialize superpixel 0 (the null superpixel)
     superpixels[0] = (Superpixel){0};
 
-    // First pass: regular SNIC to form superpixels
+    unsigned int k = 0;
     for (float iz = spacing/2; iz < DIMENSION; iz += spacing) {
         unsigned char z = (unsigned char)iz;
         for (float iy = spacing/2; iy < DIMENSION; iy += spacing) {
@@ -120,7 +119,7 @@ unsigned int snic(unsigned char *img, int d_seed, float compactness, unsigned in
             for (float ix = spacing/2; ix < DIMENSION; ix += spacing) {
                 heap_push(&pq, (HeapNode){
                     .d = 0.0f,
-                    .k = ++numk,
+                    .k = ++k,
                     .x = (unsigned char)ix,
                     .y = y,
                     .z = z
@@ -129,7 +128,7 @@ unsigned int snic(unsigned char *img, int d_seed, float compactness, unsigned in
         }
     }
 
-    float invwt = numk/(float)(IMG_SIZE);
+    const  float invwt = ((DIMENSION/D_SEED) * (DIMENSION/D_SEED) * (DIMENSION/D_SEED))/(float)(IMG_SIZE);
     const float scale = 1.0f;
 
     while (pq.len > 0) {
@@ -163,32 +162,25 @@ unsigned int snic(unsigned char *img, int d_seed, float compactness, unsigned in
 
     heap_free(&pq);
 
-    // Second pass: filter out superpixels below threshold and relabel
     unsigned int new_label = 1;
     unsigned int* label_map = (unsigned int*)calloc(numk + 1, sizeof(unsigned int));
 
-    // First mark which superpixels to keep
     for (unsigned int k = 1; k <= numk; k++) {
         if (superpixels[k].c >= iso_threshold) {
             label_map[k] = new_label++;
-            // Move the superpixel data to its new position
             superpixels[label_map[k]] = superpixels[k];
         }
     }
 
-    // Clear any remaining superpixels
     for (unsigned int k = new_label; k <= numk; k++) {
         superpixels[k] = (Superpixel){0};
     }
 
-    // Relabel the volume
     for (int i = 0; i < IMG_SIZE; i++) {
         unsigned int old_label = labels[i];
         labels[i] = (old_label > 0) ? label_map[old_label] : 0;
     }
 
     free(label_map);
-
-    // Return the final number of superpixels (new_label - 1 since new_label is one past the last used index)
     return new_label - 1;
 }
