@@ -23,66 +23,52 @@ class VolumeViewer(QMainWindow):
         self.normalized_base = ((self.values - v_min) / (v_max - v_min)).astype(np.float32)
 
         # Initialize modifiers
-        self.radius_modifier = 0.0  # [-1, 1] range
-        self.color_modifier = 0.0  # [-1, 1] range
-        self.threshold = 0.0  # [0, 1] range
+        self.radius_modifier = 0.0
+        self.color_modifier = 0.0
+        self.threshold = 0.0
 
-        self.update_mappings()
         self.setup_ui()
-        self.create_visualization()
+        self.setup_vtk_objects()
+        self.setup_visualization()
+        self.update_mappings()
+        self.update_visualization()
 
-    def update_mappings(self):
-        # Apply modifiers based on slider positions
-        if self.radius_modifier >= 0:
-            self.radius_values = self.normalized_base * (1 - self.radius_modifier) + self.radius_modifier
-        else:
-            self.radius_values = self.normalized_base * (1 + self.radius_modifier)
+    def setup_vtk_objects(self):
+        # Initialize VTK pipeline objects
+        self.points = vtk.vtkPoints()
+        self.radius_scalars = vtk.vtkFloatArray()
+        self.color_scalars = vtk.vtkFloatArray()
 
-        if self.color_modifier >= 0:
-            self.color_values = self.normalized_base * (1 - self.color_modifier) + self.color_modifier
-        else:
-            self.color_values = self.normalized_base * (1 + self.color_modifier)
+        # Set initial points and scalars
+        max_coord = np.max(np.abs(self.centroids))
+        scaled_points = self.centroids / max_coord * 99
 
-    def create_visualization(self):
-        self.renderer = vtk.vtkRenderer()
-        self.vtk_widget.GetRenderWindow().AddRenderer(self.renderer)
-        self.renderer.SetBackground(0.01, 0.01, 0.01)
+        for point, value in zip(scaled_points, self.normalized_base):
+            self.points.InsertNextPoint(point)
+            self.radius_scalars.InsertNextValue(value)
+            self.color_scalars.InsertNextValue(value)
 
-        # Create visualization only for points above threshold
-        valid_indices = self.normalized_base >= self.threshold
-        valid_centroids = self.centroids[valid_indices]
-        valid_radius = self.radius_values[valid_indices]
-        valid_colors = self.color_values[valid_indices]
+        self.polydata = vtk.vtkPolyData()
+        self.polydata.SetPoints(self.points)
+        self.polydata.GetPointData().SetScalars(self.radius_scalars)
+        self.polydata.GetPointData().AddArray(self.color_scalars)
 
-        points = vtk.vtkPoints()
-        radius_scalars = vtk.vtkFloatArray()
-        color_scalars = vtk.vtkFloatArray()
-
-        max_coord = np.max(np.abs(valid_centroids)) if len(valid_centroids) > 0 else 1
-        scaled_points = valid_centroids / max_coord * 99 if max_coord != 0 else valid_centroids
-
-        for point, radius_val, color_val in zip(scaled_points, valid_radius, valid_colors):
-            points.InsertNextPoint(point)
-            radius_scalars.InsertNextValue(radius_val)
-            color_scalars.InsertNextValue(color_val)
-
-        polydata = vtk.vtkPolyData()
-        polydata.SetPoints(points)
-        polydata.GetPointData().SetScalars(radius_scalars)
-        polydata.GetPointData().AddArray(color_scalars)
-
-        # Create sphere glyph
-        sphere = vtk.vtkSphereSource()
-        sphere.SetPhiResolution(1)
-        sphere.SetThetaResolution(1)
-        sphere.SetRadius(1.0)
+        self.sphere = vtk.vtkSphereSource()
+        self.sphere.SetPhiResolution(1)
+        self.sphere.SetThetaResolution(1)
+        self.sphere.SetRadius(1.0)
 
         self.glyph3D = vtk.vtkGlyph3D()
-        self.glyph3D.SetSourceConnection(sphere.GetOutputPort())
-        self.glyph3D.SetInputData(polydata)
+        self.glyph3D.SetSourceConnection(self.sphere.GetOutputPort())
+        self.glyph3D.SetInputData(self.polydata)
         self.glyph3D.SetScaleModeToScaleByScalar()
         self.glyph3D.SetScaleFactor(0.5)
         self.glyph3D.SetColorModeToColorByScalar()
+
+    def setup_visualization(self):
+        self.renderer = vtk.vtkRenderer()
+        self.vtk_widget.GetRenderWindow().AddRenderer(self.renderer)
+        self.renderer.SetBackground(0.01, 0.01, 0.01)
 
         # Create lookup table
         lut = vtk.vtkLookupTable()
@@ -92,21 +78,20 @@ class VolumeViewer(QMainWindow):
             lut.SetTableValue(i, color[0], color[1], color[2], 1.0)
         lut.Build()
 
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputConnection(self.glyph3D.GetOutputPort())
-        mapper.SetLookupTable(lut)
-        mapper.SetScalarRange(0, 1)
-        mapper.SetScalarModeToUsePointFieldData()
-        mapper.SelectColorArray(1)
+        self.mapper = vtk.vtkPolyDataMapper()
+        self.mapper.SetInputConnection(self.glyph3D.GetOutputPort())
+        self.mapper.SetLookupTable(lut)
+        self.mapper.SetScalarRange(0, 1)
+        self.mapper.SetScalarModeToUsePointFieldData()
+        self.mapper.SelectColorArray(1)
 
-        actor = vtk.vtkActor()
-        actor.SetMapper(mapper)
-        actor.GetProperty().SetSpecular(0.3)
-        actor.GetProperty().SetSpecularPower(20)
+        self.actor = vtk.vtkActor()
+        self.actor.SetMapper(self.mapper)
+        self.actor.GetProperty().SetSpecular(0.3)
+        self.actor.GetProperty().SetSpecularPower(20)
 
-        self.renderer.AddActor(actor)
+        self.renderer.AddActor(self.actor)
 
-        # Add lighting
         light1 = vtk.vtkLight()
         light1.SetFocalPoint(0, 0, 0)
         light1.SetPosition(1, 1, 1)
@@ -123,6 +108,39 @@ class VolumeViewer(QMainWindow):
         self.renderer.ResetCamera()
         self.vtk_widget.Initialize()
 
+    def update_mappings(self):
+        if self.radius_modifier >= 0:
+            self.radius_values = self.normalized_base * (1 - self.radius_modifier) + self.radius_modifier
+        else:
+            self.radius_values = self.normalized_base * (1 + self.radius_modifier)
+
+        if self.color_modifier >= 0:
+            self.color_values = self.normalized_base * (1 - self.color_modifier) + self.color_modifier
+        else:
+            self.color_values = self.normalized_base * (1 + self.color_modifier)
+
+    def update_visualization(self):
+        valid_indices = self.normalized_base >= self.threshold
+        valid_centroids = self.centroids[valid_indices]
+        valid_radius = self.radius_values[valid_indices]
+        valid_colors = self.color_values[valid_indices]
+
+        self.points.Reset()
+        self.radius_scalars.Reset()
+        self.color_scalars.Reset()
+
+        if len(valid_centroids) > 0:
+            max_coord = np.max(np.abs(valid_centroids))
+            scaled_points = valid_centroids / max_coord * 99
+
+            for point, radius_val, color_val in zip(scaled_points, valid_radius, valid_colors):
+                self.points.InsertNextPoint(point)
+                self.radius_scalars.InsertNextValue(radius_val)
+                self.color_scalars.InsertNextValue(color_val)
+
+        self.polydata.Modified()
+        self.vtk_widget.GetRenderWindow().Render()
+
     def setup_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
@@ -131,7 +149,6 @@ class VolumeViewer(QMainWindow):
         self.vtk_widget = QVTKRenderWindowInteractor()
         layout.addWidget(self.vtk_widget)
 
-        # Value threshold slider (0 to 1)
         self.threshold_slider = QSlider(Qt.Horizontal)
         self.threshold_slider.setMinimum(0)
         self.threshold_slider.setMaximum(100)
@@ -139,7 +156,6 @@ class VolumeViewer(QMainWindow):
         self.threshold_slider.valueChanged.connect(self.update_threshold)
         layout.addWidget(self.threshold_slider)
 
-        # Radius modifier slider (-1 to 1)
         self.radius_slider = QSlider(Qt.Horizontal)
         self.radius_slider.setMinimum(-100)
         self.radius_slider.setMaximum(100)
@@ -147,7 +163,6 @@ class VolumeViewer(QMainWindow):
         self.radius_slider.valueChanged.connect(self.update_radius_modifier)
         layout.addWidget(self.radius_slider)
 
-        # Color modifier slider (-1 to 1)
         self.color_slider = QSlider(Qt.Horizontal)
         self.color_slider.setMinimum(-100)
         self.color_slider.setMaximum(100)
@@ -160,16 +175,17 @@ class VolumeViewer(QMainWindow):
     def update_radius_modifier(self):
         self.radius_modifier = self.radius_slider.value() / 100.0
         self.update_mappings()
-        self.create_visualization()
+        self.update_visualization()
 
     def update_color_modifier(self):
         self.color_modifier = self.color_slider.value() / 100.0
         self.update_mappings()
-        self.create_visualization()
+        self.update_visualization()
 
     def update_threshold(self):
         self.threshold = self.threshold_slider.value() / 100.0
-        self.create_visualization()
+        self.update_visualization()
+
 
 def visualize_volume(centroids, values):
     app = QApplication.instance() or QApplication(sys.argv)
