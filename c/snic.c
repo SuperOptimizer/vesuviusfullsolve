@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <time.h>
 
+#define ISO_THRESHOLD 8
 #define D_SEED 2
 #define DIMENSION 256
 #define DIMENSION_SHIFT 8  // 2^8 = 256
@@ -17,20 +18,20 @@ typedef struct HeapNode {
     __fp16 d;
     unsigned int k;
     unsigned char x, y, z;
-} HeapNode;
+} HeapNode __attribute__((aligned(8)));
 
 #define heap_node_val(n) (-n.d)
 
 typedef struct Heap {
     int len, size;
     HeapNode* nodes;
-} Heap;
+} Heap __attribute__((aligned(8)));
 
 typedef struct Superpixel {
     unsigned char x, y, z;  // Coordinates as uint8
     unsigned char c;  // Changed from float to uint8
     unsigned int n;
-} Superpixel;
+} Superpixel __attribute__((aligned(8)));
 
 static inline Heap heap_alloc(int size) {
     return (Heap){.len = 0, .size = size, .nodes = (HeapNode*)calloc(size*2+1, sizeof(HeapNode))};
@@ -101,7 +102,7 @@ static inline int snic_superpixel_count(int d_seed) {
 } while(0)
 
 
-unsigned int snic(unsigned char *img, float compactness, unsigned int *labels, Superpixel* superpixels, unsigned char iso_threshold) {
+unsigned int snic(unsigned char *img, unsigned int *labels, Superpixel* superpixels) {
     float spacing = (float)DIMENSION / (float)(DIMENSION/D_SEED);
     Heap pq = heap_alloc(IMG_SIZE*16);
     const unsigned int numk = snic_superpixel_count(D_SEED);
@@ -120,7 +121,7 @@ unsigned int snic(unsigned char *img, float compactness, unsigned int *labels, S
             unsigned char y = (unsigned char)iy;
             for (float ix = spacing/2; ix < DIMENSION; ix += spacing) {
                 const int i = DEFINE_OFFSET(z, y, (unsigned char)ix);
-                if (img[i] >= iso_threshold) {
+                if (img[i] >= ISO_THRESHOLD) {
                     heap_push(&pq, (HeapNode){
                         .d = 0.0f,
                         .k = ++k,
@@ -156,7 +157,7 @@ unsigned int snic(unsigned char *img, float compactness, unsigned int *labels, S
         const unsigned char img_val = img[i];
 
         // Skip processing neighbors if the average would fall below threshold
-        if ((sp->c * sp->n + img_val) / (sp->n + 1) < iso_threshold) continue;
+        if ((sp->c * sp->n + img_val) / (sp->n + 1) < ISO_THRESHOLD) continue;
 
         sp->c = (sp->c * sp->n + img_val) / (sp->n + 1);
         sp->x = n.x;

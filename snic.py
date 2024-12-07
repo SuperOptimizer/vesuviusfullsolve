@@ -15,7 +15,7 @@ class Superpixel(ctypes.Structure):
         ("n", ctypes.c_uint32),
     ]
 
-def run_snic(volume, iso_threshold=0):
+def run_snic(volume):
     """
     Run SNIC superpixel segmentation on a 3D volume with intensity threshold.
 
@@ -51,8 +51,7 @@ def run_snic(volume, iso_threshold=0):
     lib.snic.argtypes = [
         np.ctypeslib.ndpointer(dtype=np.uint8),
         np.ctypeslib.ndpointer(dtype=np.uint32),
-        ctypes.POINTER(Superpixel),
-        ctypes.c_uint8
+        ctypes.POINTER(Superpixel)
     ]
     lib.snic.restype = ctypes.c_uint32  # Changed to return unsigned int
 
@@ -62,7 +61,7 @@ def run_snic(volume, iso_threshold=0):
     superpixels = (Superpixel * max_superpixels)()
 
     # Run SNIC with iso threshold and get number of superpixels
-    num_superpixels = lib.snic(volume, labels, superpixels, iso_threshold)
+    num_superpixels = lib.snic(volume, labels, superpixels)
 
     return labels, superpixels, num_superpixels
 

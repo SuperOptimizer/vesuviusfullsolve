@@ -189,8 +189,8 @@ def process_chunk(chunk_path, output_path=None):
     # Convert to uint8 and normalize
     processed = np.ascontiguousarray(chunk, dtype=np.float32)
     processed = (processed - processed.min()) / (processed.max() - processed.min())
-    processed[processed < 0.1] = 0
-    processed[processed > 0.9] = 1
+    #processed[processed < 0.1] = 0
+    #processed[processed > 0.9] = 1
     #processed = (processed - processed.min()) / (processed.max() - processed.min())
 
 
@@ -206,7 +206,6 @@ def process_chunk(chunk_path, output_path=None):
     # Run SNIC with fixed parameters for 256³ volume
     labels, superpixels, num_superpixels = snic.run_snic(
         processed,
-        iso_threshold= 2
     )
 
     print(f"SNIC completed in {time.time() - start_time:.2f} seconds")
