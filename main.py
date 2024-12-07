@@ -10,6 +10,8 @@ from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QSl
 from PyQt5.QtCore import Qt
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 import time
+import snic
+from pathlib import Path
 
 
 class VolumeViewer(QMainWindow):
@@ -62,7 +64,7 @@ class VolumeViewer(QMainWindow):
         self.glyph3D.SetSourceConnection(self.sphere.GetOutputPort())
         self.glyph3D.SetInputData(self.polydata)
         self.glyph3D.SetScaleModeToScaleByScalar()
-        self.glyph3D.SetScaleFactor(0.5)
+        self.glyph3D.SetScaleFactor(.125)
         self.glyph3D.SetColorModeToColorByScalar()
 
     def setup_visualization(self):
@@ -194,64 +196,96 @@ def visualize_volume(centroids, values):
     app.exec_()
 
 
-def process_chunk(chunk_path, output_path=None):
-    print("Reading chunk...")
-    scroll1 = zarr.open(chunk_path, mode="r")
 
-    # Read and process fixed size chunk (256³)
-    chunk = scroll1[4096:4096 + 256, 2048:2048 + 256, 2048:2048 + 256]
+def process_chunk(chunk_path, output_path=None, chunk_coords=(4096, 4096, 4096), chunk_size=256):
+
+    print("Reading chunk...")
+    scroll = zarr.open(chunk_path, mode="r")
+
+    # Extract chunk coordinates
+    z_start, y_start, x_start = chunk_coords
+
+    # Read and process fixed size chunk
+    chunk = scroll[
+            z_start:z_start + chunk_size,
+            y_start:y_start + chunk_size,
+            x_start:x_start + chunk_size
+            ]
 
     print("Processing volume...")
-    # Convert to uint8 and normalize
-    processed = np.ascontiguousarray(chunk, dtype=np.float32)
-    processed = (processed - processed.min()) / (processed.max() - processed.min())
-    #processed[processed < 0.1] = 0
-    #processed[processed > 0.9] = 1
-    #processed = (processed - processed.min()) / (processed.max() - processed.min())
 
+    processed = np.ascontiguousarray(chunk)
 
-    # Convert back to uint8 for SNIC
-    processed = (processed * 255).astype(np.uint8)
-
-    # Apply GLCAE
     processed = pipeline.apply_glcae_3d(processed)
-
+    processed[processed < 32] = 0
     print("Running SNIC...")
     start_time = time.time()
 
-    # Run SNIC with fixed parameters for 256³ volume
-    labels, superpixels, num_superpixels = snic.run_snic(
-        processed,
-    )
+    # Run SNIC with fixed parameters for chunk
+    labels, superpixels = snic.run_snic(processed)
 
     print(f"SNIC completed in {time.time() - start_time:.2f} seconds")
-    print(f"Created {num_superpixels} superpixels above threshold")
 
-    # Extract features from valid superpixels (1 to num_superpixels)
-    centroids = [(sp.x, sp.y, sp.z) for sp in superpixels[1:num_superpixels + 1]]
-    values = np.array([sp.c for sp in superpixels[1:num_superpixels + 1]])
+    # Extract features and adjust for chunk coordinates
+    centroids = [
+        (sp.z + z_start, sp.y + y_start, sp.x + x_start)  # Note: changed order to match chunk coords
+        for sp in superpixels[1:]
+        if sp.n > 0  # Filter out empty superpixels
+    ]
+    values = np.array([sp.c for sp in superpixels[1:] if sp.n > 0])
+
+    # Calculate and print statistics
+    print(f"Generated {len(centroids)} superpixels")
+    print(f"Average intensity: {values.mean():.2f}")
+    print(f"Intensity std: {values.std():.2f}")
 
     # Optionally save results
     if output_path:
-        np.savez(output_path,
-                 labels=labels,
-                 centroids=centroids,
-                 values=values,
-                 num_superpixels=num_superpixels)
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            output_path,
+            labels=labels,
+            centroids=centroids,
+            values=values,
+            chunk_coords=chunk_coords,
+            chunk_size=chunk_size,
+            processing_time=time.time() - start_time
+        )
 
     return centroids, values
 
 
+
 if __name__ == "__main__":
+    # Set up paths
+    SCROLL_PATH = Path(
+        "/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll1/PHercParis4.volpkg/volumes_zarr_standardized/54keV_7.91um_Scroll1A.zarr/0")
+    OUTPUT_DIR = Path("output")
+
+    # Ensure output directory exists
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
     # Compile SNIC
     print("Compiling SNIC...")
-    snic.compile_snic()
+    try:
+        snic.compile_snic()
+    except Exception as e:
+        print(f"Error compiling SNIC: {e}")
+        raise
 
-    # Process scroll chunk
-    SCROLL_PATH = "/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll1/PHercParis4.volpkg/volumes_zarr_standardized/54keV_7.91um_Scroll1A.zarr/0"
+    try:
+        # Process scroll chunk
+        centroids, values = process_chunk(
+            SCROLL_PATH,
+            output_path=OUTPUT_DIR / "scroll1_chunk_results.npz"
+        )
 
-    centroids, values = process_chunk(SCROLL_PATH)
+        # Visualize results if visualization function is available
+        if 'visualize_volume' in globals():
+            print("Visualizing results...")
+            visualize_volume(centroids, values)
 
-    # Visualize results
-    print("Visualizing results...")
-    visualize_volume(centroids, values)
+    except Exception as e:
+        print(f"Error in main processing: {e}")
+        raise
