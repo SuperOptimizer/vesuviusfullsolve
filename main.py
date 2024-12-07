@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QSl
 from PyQt5.QtCore import Qt
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 import time
-import snic
+
 
 class VolumeViewer(QMainWindow):
     def __init__(self, centroids, values):
@@ -18,15 +18,27 @@ class VolumeViewer(QMainWindow):
         self.centroids = np.array(centroids)
         self.values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # Normalize values
-        v_min, v_max = self.values.min(), self.values.max()
+        # Normalize base values to [0,1]
+        v_min, v_max = 0,255#self.values.min(), self.values.max()
         if v_min == v_max:
-            self.normalized_values = np.zeros_like(self.values, dtype=np.float32)
+            self.normalized_base = np.zeros_like(self.values, dtype=np.float32)
         else:
-            self.normalized_values = ((self.values - v_min) / (v_max - v_min)).astype(np.float32)
+            self.normalized_base = ((self.values - v_min) / (v_max - v_min)).astype(np.float32)
 
+        # Apply separate mappings for radius and color
+        self.radius_boost = 0.5  # Controls how much small values are boosted for radius
+        self.color_boost = 0.0  # Controls how much small values are boosted for color
+
+        self.update_mappings()
         self.setup_ui()
         self.create_visualization()
+
+    def update_mappings(self):
+        # Map normalized values to radius (boosted)
+        self.radius_values = self.normalized_base + (1 - self.normalized_base) * self.radius_boost
+
+        # Map normalized values to color (potentially different boost)
+        self.color_values = self.normalized_base + (1 - self.normalized_base) * self.color_boost
 
     def create_visualization(self):
         self.renderer = vtk.vtkRenderer()
@@ -35,7 +47,8 @@ class VolumeViewer(QMainWindow):
 
         # Create points and scalars
         points = vtk.vtkPoints()
-        scalars = vtk.vtkFloatArray()
+        radius_scalars = vtk.vtkFloatArray()
+        color_scalars = vtk.vtkFloatArray()
 
         # Scale points if needed
         max_coord = np.max(np.abs(self.centroids))
@@ -44,18 +57,22 @@ class VolumeViewer(QMainWindow):
         else:
             scaled_points = self.centroids / max_coord * 99
 
-        for point, value in zip(scaled_points, self.normalized_values):
+        for point, radius_val, color_val in zip(scaled_points, self.radius_values, self.color_values):
             points.InsertNextPoint(point)
-            scalars.InsertNextValue(value)
+            radius_scalars.InsertNextValue(radius_val)
+            color_scalars.InsertNextValue(color_val)
 
         polydata = vtk.vtkPolyData()
         polydata.SetPoints(points)
-        polydata.GetPointData().SetScalars(scalars)
+        # Use radius values for scaling
+        polydata.GetPointData().SetScalars(radius_scalars)
+        # Add color values as a separate array
+        polydata.GetPointData().AddArray(color_scalars)
 
         # Create sphere glyph
         sphere = vtk.vtkSphereSource()
-        sphere.SetPhiResolution(4)
-        sphere.SetThetaResolution(4)
+        sphere.SetPhiResolution(1)
+        sphere.SetThetaResolution(1)
         sphere.SetRadius(1.0)
 
         self.glyph3D = vtk.vtkGlyph3D()
@@ -77,6 +94,9 @@ class VolumeViewer(QMainWindow):
         mapper.SetInputConnection(self.glyph3D.GetOutputPort())
         mapper.SetLookupTable(lut)
         mapper.SetScalarRange(0, 1)
+        # Use the color values array for coloring
+        mapper.SetScalarModeToUsePointFieldData()
+        mapper.SelectColorArray(1)  # Index 1 is our color_scalars array
 
         actor = vtk.vtkActor()
         actor.SetMapper(mapper)
@@ -90,7 +110,7 @@ class VolumeViewer(QMainWindow):
         light1 = vtk.vtkLight()
         light1.SetFocalPoint(0, 0, 0)
         light1.SetPosition(1, 1, 1)
-        light1.SetIntensity(1.0)
+        light1.SetIntensity(1.2)
 
         light2 = vtk.vtkLight()
         light2.SetFocalPoint(0, 0, 0)
@@ -111,17 +131,44 @@ class VolumeViewer(QMainWindow):
         self.vtk_widget = QVTKRenderWindowInteractor()
         layout.addWidget(self.vtk_widget)
 
-        self.slider = QSlider(Qt.Horizontal)
-        self.slider.setMinimum(0)
-        self.slider.setMaximum(100)
-        self.slider.setValue(0)
-        self.slider.valueChanged.connect(self.update_threshold)
-        layout.addWidget(self.slider)
+        # Value threshold slider
+        self.threshold_slider = QSlider(Qt.Horizontal)
+        self.threshold_slider.setMinimum(0)
+        self.threshold_slider.setMaximum(100)
+        self.threshold_slider.setValue(0)
+        self.threshold_slider.valueChanged.connect(self.update_threshold)
+        layout.addWidget(self.threshold_slider)
+
+        # Radius boost slider
+        self.radius_slider = QSlider(Qt.Horizontal)
+        self.radius_slider.setMinimum(0)
+        self.radius_slider.setMaximum(100)
+        self.radius_slider.setValue(int(self.radius_boost * 100))
+        self.radius_slider.valueChanged.connect(self.update_radius_boost)
+        layout.addWidget(self.radius_slider)
+
+        # Color boost slider
+        self.color_slider = QSlider(Qt.Horizontal)
+        self.color_slider.setMinimum(0)
+        self.color_slider.setMaximum(100)
+        self.color_slider.setValue(int(self.color_boost * 100))
+        self.color_slider.valueChanged.connect(self.update_color_boost)
+        layout.addWidget(self.color_slider)
 
         self.resize(800, 600)
 
+    def update_radius_boost(self):
+        self.radius_boost = self.radius_slider.value() / 100.0
+        self.update_mappings()
+        self.create_visualization()
+
+    def update_color_boost(self):
+        self.color_boost = self.color_slider.value() / 100.0
+        self.update_mappings()
+        self.create_visualization()
+
     def update_threshold(self):
-        threshold = self.slider.value() / 100.0
+        threshold = self.threshold_slider.value() / 100.0
 
         threshold_filter = vtk.vtkThresholdPoints()
         threshold_filter.SetInputData(self.polydata)
@@ -148,44 +195,42 @@ def process_chunk(chunk_path, output_path=None):
     print("Processing volume...")
     # Convert to uint8 and normalize
     processed = np.ascontiguousarray(chunk, dtype=np.float32)
-    processed = (processed * 255.0 / processed.max()).astype(np.uint8)
+    processed = (processed - processed.min()) / (processed.max() - processed.min())
+    #processed[processed < 0.1] = 0
+    #processed[processed > 0.9] = 1
+    #processed = (processed - processed.min()) / (processed.max() - processed.min())
 
-    # Apply GLCAE
-    processed = pipeline.apply_glcae_3d(processed)
-
-    # Apply CLAHE
-    processed = skimage.exposure.equalize_adapthist(
-        processed.astype(np.float32),
-        nbins=256,
-        clip_limit=0.05
-    )
 
     # Convert back to uint8 for SNIC
     processed = (processed * 255).astype(np.uint8)
+
+    # Apply GLCAE
+    processed = pipeline.apply_glcae_3d(processed)
 
     print("Running SNIC...")
     start_time = time.time()
 
     # Run SNIC with fixed parameters for 256³ volume
-    # Run SNIC
-    labels, superpixels = snic.run_snic(
+    labels, superpixels, num_superpixels = snic.run_snic(
         processed,
-        d_seed=2,  # Controls number of superpixels
-        compactness=1.0,  # Spatial regularization
+        d_seed=2,
+        iso_threshold= 32
     )
 
     print(f"SNIC completed in {time.time() - start_time:.2f} seconds")
+    print(f"Created {num_superpixels} superpixels above threshold")
 
-    # Extract features
-    centroids = [(sp.x, sp.y, sp.z) for sp in superpixels[1:]]
-    values = np.array([sp.c for sp in superpixels[1:]])
+    # Extract features from valid superpixels (1 to num_superpixels)
+    centroids = [(sp.x, sp.y, sp.z) for sp in superpixels[1:num_superpixels + 1]]
+    values = np.array([sp.c for sp in superpixels[1:num_superpixels + 1]])
 
     # Optionally save results
     if output_path:
         np.savez(output_path,
                  labels=labels,
                  centroids=centroids,
-                 values=values)
+                 values=values,
+                 num_superpixels=num_superpixels)
 
     return centroids, values
 
@@ -202,5 +247,4 @@ if __name__ == "__main__":
 
     # Visualize results
     print("Visualizing results...")
-
     visualize_volume(centroids, values)

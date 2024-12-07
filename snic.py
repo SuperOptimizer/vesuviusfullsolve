@@ -11,9 +11,9 @@ class Superpixel(ctypes.Structure):
         ("n", ctypes.c_uint32),
     ]
 
-def run_snic(volume, d_seed, compactness=40.0):
+def run_snic(volume, d_seed, iso_threshold=0):
     """
-    Run SNIC superpixel segmentation on a 3D volume.
+    Run SNIC superpixel segmentation on a 3D volume with intensity threshold.
 
     Parameters:
     -----------
@@ -21,8 +21,8 @@ def run_snic(volume, d_seed, compactness=40.0):
         Input 3D volume as uint8 with values in [0,255]
     d_seed : int
         Seed spacing (controls number of superpixels)
-    compactness : float
-        Spatial regularization weight
+    iso_threshold : int
+        Intensity threshold (0-255). Superpixels with average intensity below this are filtered out
 
     Returns:
     --------
@@ -30,6 +30,8 @@ def run_snic(volume, d_seed, compactness=40.0):
         Integer array of superpixel labels
     superpixels : ctypes array
         Array of Superpixel structures with uint8 coordinates and intensities
+    num_superpixels : int
+        Number of superpixels actually created (after filtering)
     """
     if not volume.flags['C_CONTIGUOUS']:
         volume = np.ascontiguousarray(volume)
@@ -45,23 +47,23 @@ def run_snic(volume, d_seed, compactness=40.0):
 
     # Configure function signature
     lib.snic.argtypes = [
-        np.ctypeslib.ndpointer(dtype=np.uint8),  # Changed from float32 to uint8
+        np.ctypeslib.ndpointer(dtype=np.uint8),
         ctypes.c_int,
-        ctypes.c_float,
         np.ctypeslib.ndpointer(dtype=np.uint32),
-        ctypes.POINTER(Superpixel)
+        ctypes.POINTER(Superpixel),
+        ctypes.c_uint8
     ]
-    lib.snic.restype = None
+    lib.snic.restype = ctypes.c_uint32  # Changed to return unsigned int
 
     # Prepare output arrays
     labels = np.zeros(volume.shape, dtype=np.uint32)
     max_superpixels = snic_superpixel_count(d_seed) + 1
     superpixels = (Superpixel * max_superpixels)()
 
-    # Run SNIC
-    lib.snic(volume, d_seed, compactness, labels, superpixels)
+    # Run SNIC with iso threshold and get number of superpixels
+    num_superpixels = lib.snic(volume, d_seed, labels, superpixels, iso_threshold)
 
-    return labels, superpixels
+    return labels, superpixels, num_superpixels
 
 def compile_snic():
     """Compile the SNIC C code into a shared library."""

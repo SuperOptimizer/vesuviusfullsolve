@@ -13,148 +13,182 @@
 #define IMG_SIZE (DIMENSION * DIMENSION * DIMENSION)
 
 typedef struct HeapNode {
-  __fp16 d;
-  unsigned int k;
-  unsigned char x, y, z;
+    __fp16 d;
+    unsigned int k;
+    unsigned char x, y, z;
 } HeapNode;
 
 #define heap_node_val(n) (-n.d)
 
 typedef struct Heap {
-  int len, size;
-  HeapNode* nodes;
+    int len, size;
+    HeapNode* nodes;
 } Heap;
 
 typedef struct Superpixel {
-  unsigned char x, y, z;  // Coordinates as uint8
-  unsigned char c;  // Changed from float to uint8
-  unsigned int n;
+    unsigned char x, y, z;  // Coordinates as uint8
+    unsigned char c;  // Changed from float to uint8
+    unsigned int n;
 } Superpixel;
 
 static inline Heap heap_alloc(int size) {
-  return (Heap){.len = 0, .size = size, .nodes = (HeapNode*)calloc(size*2+1, sizeof(HeapNode))};
+    return (Heap){.len = 0, .size = size, .nodes = (HeapNode*)calloc(size*2+1, sizeof(HeapNode))};
 }
 
 static inline void heap_free(Heap *heap) {
-  free(heap->nodes);
+    free(heap->nodes);
 }
 
 static inline void heap_push(Heap *heap, HeapNode node) {
-  int i = ++heap->len;
-  HeapNode* nodes = heap->nodes;
-  while(i > 1) {
-    int parent = i >> 1;
-    if(heap_node_val(nodes[parent]) >= heap_node_val(node)) break;
-    nodes[i] = nodes[parent];
-    i = parent;
-  }
-  nodes[i] = node;
+    int i = ++heap->len;
+    HeapNode* nodes = heap->nodes;
+    while(i > 1) {
+        int parent = i >> 1;
+        if(heap_node_val(nodes[parent]) >= heap_node_val(node)) break;
+        nodes[i] = nodes[parent];
+        i = parent;
+    }
+    nodes[i] = node;
 }
 
 static inline HeapNode heap_pop(Heap *heap) {
-  HeapNode* nodes = heap->nodes;
-  HeapNode result = nodes[1];
-  HeapNode last = nodes[heap->len--];
-  int i = 1;
-  while(i <= (heap->len >> 1)) {
-    int child = i << 1;
-    if(child < heap->len && heap_node_val(nodes[child]) < heap_node_val(nodes[child + 1]))
-      child++;
-    if(heap_node_val(last) >= heap_node_val(nodes[child])) break;
-    nodes[i] = nodes[child];
-    i = child;
-  }
-  nodes[i] = last;
-  return result;
+    HeapNode* nodes = heap->nodes;
+    HeapNode result = nodes[1];
+    HeapNode last = nodes[heap->len--];
+    int i = 1;
+    while(i <= (heap->len >> 1)) {
+        int child = i << 1;
+        if(child < heap->len && heap_node_val(nodes[child]) < heap_node_val(nodes[child + 1]))
+            child++;
+        if(heap_node_val(last) >= heap_node_val(nodes[child])) break;
+        nodes[i] = nodes[child];
+        i = child;
+    }
+    nodes[i] = last;
+    return result;
 }
 
 static inline int snic_superpixel_count(int d_seed) {
-  return (DIMENSION/d_seed) * (DIMENSION/d_seed) * (DIMENSION/d_seed);
+    return (DIMENSION/d_seed) * (DIMENSION/d_seed) * (DIMENSION/d_seed);
 }
 
 #define DEFINE_OFFSET(z, y, x) (((z) << (DIMENSION_SHIFT * 2)) | ((x) << DIMENSION_SHIFT) | (y))
 
 #define PROCESS_NEIGHBOR(zoff, yoff, xoff) do { \
-  const int zz = n.z + (zoff); \
-  const int yy = n.y + (yoff); \
-  const int xx = n.x + (xoff); \
-  if (zz >= 0 && zz < DIMENSION && \
-      yy >= 0 && yy < DIMENSION && \
-      xx >= 0 && xx < DIMENSION) { \
-    const int ii = DEFINE_OFFSET(zz, yy, xx); \
-    if (labels[ii] <= 0) { \
-      const float dc = scale * (c_over_ksize - img[ii]); \
-      const float dx = x_over_ksize - xx; \
-      const float dy = y_over_ksize - yy; \
-      const float dz = z_over_ksize - zz; \
-      const float d = (dc*dc + (dx*dx + dy*dy + dz*dz)*invwt) / ksize; \
-      heap_push(&pq, (HeapNode){ \
-        .d = d, \
-        .k = k, \
-        .x = xx, \
-        .y = yy, \
-        .z = zz \
-      }); \
+    const int zz = n.z + (zoff); \
+    const int yy = n.y + (yoff); \
+    const int xx = n.x + (xoff); \
+    if (zz >= 0 && zz < DIMENSION && \
+        yy >= 0 && yy < DIMENSION && \
+        xx >= 0 && xx < DIMENSION) { \
+        const int ii = DEFINE_OFFSET(zz, yy, xx); \
+        if (labels[ii] <= 0) { \
+            const float dc = scale * (c_over_ksize - img[ii]); \
+            const float dx = x_over_ksize - xx; \
+            const float dy = y_over_ksize - yy; \
+            const float dz = z_over_ksize - zz; \
+            const float d = (dc*dc + (dx*dx + dy*dy + dz*dz)*invwt) / ksize; \
+            heap_push(&pq, (HeapNode){ \
+                .d = d, \
+                .k = k, \
+                .x = xx, \
+                .y = yy, \
+                .z = zz \
+            }); \
+        } \
     } \
-  } \
 } while(0)
 
+unsigned int snic(unsigned char *img, int d_seed, float compactness, unsigned int *labels, Superpixel* superpixels, unsigned char iso_threshold) {
+    float spacing = (float)DIMENSION / (float)(DIMENSION/d_seed);
+    Heap pq = heap_alloc(IMG_SIZE*16);
+    unsigned int numk = 0;
 
-
-// Update the processing loop to handle uint8 intensity values
-void snic(unsigned char *img, int d_seed, float compactness, unsigned int *labels, Superpixel* superpixels) {
-  float spacing = (float)DIMENSION / (float)(DIMENSION/d_seed);
-  Heap pq = heap_alloc(IMG_SIZE*16);
-  unsigned int numk = 0;
-
-  for (float iz = spacing/2; iz < DIMENSION; iz += spacing) {
-    unsigned char z = (unsigned char)iz;
-    for (float iy = spacing/2; iy < DIMENSION; iy += spacing) {
-      unsigned char y = (unsigned char)iy;
-      for (float ix = spacing/2; ix < DIMENSION; ix += spacing) {
-        heap_push(&pq, (HeapNode){
-          .d = 0.0f,
-          .k = ++numk,
-          .x = (unsigned char)ix,
-          .y = y,
-          .z = z
-        });
-      }
+    // Initialize labels to -1 (unassigned)
+    for (int i = 0; i < IMG_SIZE; i++) {
+        labels[i] = 0;
     }
-  }
 
-  float invwt = (compactness*compactness*numk)/(float)(IMG_SIZE);
-  const float scale = 1.0f;  // Adjusted since we're using uint8 values
+    // Initialize superpixel 0 (the null superpixel)
+    superpixels[0] = (Superpixel){0};
 
-  while (pq.len > 0) {
-    HeapNode n = heap_pop(&pq);
-    const int i = DEFINE_OFFSET(n.z, n.y, n.x);
-    if (labels[i] > 0) continue;
+    // First pass: regular SNIC to form superpixels
+    for (float iz = spacing/2; iz < DIMENSION; iz += spacing) {
+        unsigned char z = (unsigned char)iz;
+        for (float iy = spacing/2; iy < DIMENSION; iy += spacing) {
+            unsigned char y = (unsigned char)iy;
+            for (float ix = spacing/2; ix < DIMENSION; ix += spacing) {
+                heap_push(&pq, (HeapNode){
+                    .d = 0.0f,
+                    .k = ++numk,
+                    .x = (unsigned char)ix,
+                    .y = y,
+                    .z = z
+                });
+            }
+        }
+    }
 
-    const unsigned int k = n.k;
-    labels[i] = k;
-    Superpixel* sp = &superpixels[k];
-    const unsigned char img_val = img[i];
-    sp->c = (sp->c * sp->n + img_val) / (sp->n + 1);  // Running average as uint8
-    sp->x = n.x;
-    sp->y = n.y;
-    sp->z = n.z;
-    sp->n++;
+    float invwt = numk/(float)(IMG_SIZE);
+    const float scale = 1.0f;
 
-    const float ksize = (float)sp->n;
-    const float c_over_ksize = (float)sp->c;  // Convert uint8 to float for distance calculation
-    const float x_over_ksize = sp->x;
-    const float y_over_ksize = sp->y;
-    const float z_over_ksize = sp->z;
+    while (pq.len > 0) {
+        HeapNode n = heap_pop(&pq);
+        const int i = DEFINE_OFFSET(n.z, n.y, n.x);
+        if (labels[i] > 0) continue;
 
-    // Rest of the neighbor processing remains the same
-    PROCESS_NEIGHBOR(-1,  0,  0);
-    PROCESS_NEIGHBOR( 1,  0,  0);
-    PROCESS_NEIGHBOR( 0, -1,  0);
-    PROCESS_NEIGHBOR( 0,  1,  0);
-    PROCESS_NEIGHBOR( 0,  0, -1);
-    PROCESS_NEIGHBOR( 0,  0,  1);
-  }
+        const unsigned int k = n.k;
+        labels[i] = k;
+        Superpixel* sp = &superpixels[k];
+        const unsigned char img_val = img[i];
+        sp->c = (sp->c * sp->n + img_val) / (sp->n + 1);
+        sp->x = n.x;
+        sp->y = n.y;
+        sp->z = n.z;
+        sp->n++;
 
-  heap_free(&pq);
+        const float ksize = (float)sp->n;
+        const float c_over_ksize = (float)sp->c;
+        const float x_over_ksize = sp->x;
+        const float y_over_ksize = sp->y;
+        const float z_over_ksize = sp->z;
+
+        PROCESS_NEIGHBOR(-1,  0,  0);
+        PROCESS_NEIGHBOR( 1,  0,  0);
+        PROCESS_NEIGHBOR( 0, -1,  0);
+        PROCESS_NEIGHBOR( 0,  1,  0);
+        PROCESS_NEIGHBOR( 0,  0, -1);
+        PROCESS_NEIGHBOR( 0,  0,  1);
+    }
+
+    heap_free(&pq);
+
+    // Second pass: filter out superpixels below threshold and relabel
+    unsigned int new_label = 1;
+    unsigned int* label_map = (unsigned int*)calloc(numk + 1, sizeof(unsigned int));
+
+    // First mark which superpixels to keep
+    for (unsigned int k = 1; k <= numk; k++) {
+        if (superpixels[k].c >= iso_threshold) {
+            label_map[k] = new_label++;
+            // Move the superpixel data to its new position
+            superpixels[label_map[k]] = superpixels[k];
+        }
+    }
+
+    // Clear any remaining superpixels
+    for (unsigned int k = new_label; k <= numk; k++) {
+        superpixels[k] = (Superpixel){0};
+    }
+
+    // Relabel the volume
+    for (int i = 0; i < IMG_SIZE; i++) {
+        unsigned int old_label = labels[i];
+        labels[i] = (old_label > 0) ? label_map[old_label] : 0;
+    }
+
+    free(label_map);
+
+    // Return the final number of superpixels (new_label - 1 since new_label is one past the last used index)
+    return new_label - 1;
 }
