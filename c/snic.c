@@ -100,6 +100,7 @@ static inline int snic_superpixel_count(int d_seed) {
     } \
 } while(0)
 
+
 unsigned int snic(unsigned char *img, float compactness, unsigned int *labels, Superpixel* superpixels, unsigned char iso_threshold) {
     float spacing = (float)DIMENSION / (float)(DIMENSION/D_SEED);
     Heap pq = heap_alloc(IMG_SIZE*16);
@@ -111,26 +112,39 @@ unsigned int snic(unsigned char *img, float compactness, unsigned int *labels, S
 
     superpixels[0] = (Superpixel){0};
 
+    // Initialize k and filter out candidates below threshold immediately
     unsigned int k = 0;
     for (float iz = spacing/2; iz < DIMENSION; iz += spacing) {
         unsigned char z = (unsigned char)iz;
         for (float iy = spacing/2; iy < DIMENSION; iy += spacing) {
             unsigned char y = (unsigned char)iy;
             for (float ix = spacing/2; ix < DIMENSION; ix += spacing) {
-                heap_push(&pq, (HeapNode){
-                    .d = 0.0f,
-                    .k = ++k,
-                    .x = (unsigned char)ix,
-                    .y = y,
-                    .z = z
-                });
+                const int i = DEFINE_OFFSET(z, y, (unsigned char)ix);
+                if (img[i] >= iso_threshold) {
+                    heap_push(&pq, (HeapNode){
+                        .d = 0.0f,
+                        .k = ++k,
+                        .x = (unsigned char)ix,
+                        .y = y,
+                        .z = z
+                    });
+                    // Initialize superpixel with the initial intensity value
+                    superpixels[k] = (Superpixel){
+                        .x = (unsigned char)ix,
+                        .y = y,
+                        .z = z,
+                        .c = img[i],
+                        .n = 1
+                    };
+                }
             }
         }
     }
 
-    const  float invwt = ((DIMENSION/D_SEED) * (DIMENSION/D_SEED) * (DIMENSION/D_SEED))/(float)(IMG_SIZE);
+    const float invwt = ((DIMENSION/D_SEED) * (DIMENSION/D_SEED) * (DIMENSION/D_SEED))/(float)(IMG_SIZE);
     const float scale = 1.0f;
 
+    // Main clustering loop
     while (pq.len > 0) {
         HeapNode n = heap_pop(&pq);
         const int i = DEFINE_OFFSET(n.z, n.y, n.x);
@@ -140,6 +154,10 @@ unsigned int snic(unsigned char *img, float compactness, unsigned int *labels, S
         labels[i] = k;
         Superpixel* sp = &superpixels[k];
         const unsigned char img_val = img[i];
+
+        // Skip processing neighbors if the average would fall below threshold
+        if ((sp->c * sp->n + img_val) / (sp->n + 1) < iso_threshold) continue;
+
         sp->c = (sp->c * sp->n + img_val) / (sp->n + 1);
         sp->x = n.x;
         sp->y = n.y;
@@ -161,26 +179,5 @@ unsigned int snic(unsigned char *img, float compactness, unsigned int *labels, S
     }
 
     heap_free(&pq);
-
-    unsigned int new_label = 1;
-    unsigned int* label_map = (unsigned int*)calloc(numk + 1, sizeof(unsigned int));
-
-    for (unsigned int k = 1; k <= numk; k++) {
-        if (superpixels[k].c >= iso_threshold) {
-            label_map[k] = new_label++;
-            superpixels[label_map[k]] = superpixels[k];
-        }
-    }
-
-    for (unsigned int k = new_label; k <= numk; k++) {
-        superpixels[k] = (Superpixel){0};
-    }
-
-    for (int i = 0; i < IMG_SIZE; i++) {
-        unsigned int old_label = labels[i];
-        labels[i] = (old_label > 0) ? label_map[old_label] : 0;
-    }
-
-    free(label_map);
-    return new_label - 1;
+    return k; // k is already the count of superpixels above threshold
 }
