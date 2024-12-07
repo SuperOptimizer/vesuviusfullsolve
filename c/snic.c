@@ -10,31 +10,34 @@
 #define ISO_THRESHOLD 8
 #define D_SEED 2
 #define DIMENSION 256
-#define DIMENSION_SHIFT 8  // 2^8 = 256
+#define DIMENSION_SHIFT 8
 #define LY_LX (DIMENSION * DIMENSION)
 #define IMG_SIZE (DIMENSION * DIMENSION * DIMENSION)
 
 typedef struct HeapNode {
-    __fp16 d;
-    unsigned int k;
-    unsigned char x, y, z;
+    uint32_t k;
+    uint8_t x, y, z;
+        uint8_t d;
+
 } HeapNode __attribute__((aligned(8)));
 
-#define heap_node_val(n) (-n.d)
+#define heap_node_val(n) (255 - n.d)
 
 typedef struct Heap {
-    int len, size;
+    int32_t len;
+    int32_t size;
     HeapNode* nodes;
 } Heap __attribute__((aligned(8)));
 
 typedef struct Superpixel {
-    unsigned char x, y, z;  // Coordinates as uint8
-    unsigned char c;  // Changed from float to uint8
-    unsigned int n;
+    uint8_t x, y, z;
+    uint8_t c;
+    uint32_t n;
 } Superpixel __attribute__((aligned(8)));
 
-static inline Heap heap_alloc(int size) {
-    return (Heap){.len = 0, .size = size, .nodes = (HeapNode*)calloc(size*2+1, sizeof(HeapNode))};
+static inline Heap heap_alloc(int32_t size) {
+    HeapNode* nodes = (HeapNode*)malloc((size * 2 + 1) * sizeof(HeapNode));
+    return (Heap){0, size, nodes};
 }
 
 static inline void heap_free(Heap *heap) {
@@ -42,13 +45,11 @@ static inline void heap_free(Heap *heap) {
 }
 
 static inline void heap_push(Heap *heap, HeapNode node) {
-    int i = ++heap->len;
+    int32_t i = ++heap->len;
     HeapNode* nodes = heap->nodes;
-    while(i > 1) {
-        int parent = i >> 1;
-        if(heap_node_val(nodes[parent]) >= heap_node_val(node)) break;
-        nodes[i] = nodes[parent];
-        i = parent;
+
+    for (; i > 1 && heap_node_val(nodes[i >> 1]) < heap_node_val(node); i >>= 1) {
+        nodes[i] = nodes[i >> 1];
     }
     nodes[i] = node;
 }
@@ -57,12 +58,13 @@ static inline HeapNode heap_pop(Heap *heap) {
     HeapNode* nodes = heap->nodes;
     HeapNode result = nodes[1];
     HeapNode last = nodes[heap->len--];
-    int i = 1;
-    while(i <= (heap->len >> 1)) {
-        int child = i << 1;
-        if(child < heap->len && heap_node_val(nodes[child]) < heap_node_val(nodes[child + 1]))
+    int32_t i = 1, child;
+
+    while ((child = i << 1) <= heap->len) {
+        if (child < heap->len && heap_node_val(nodes[child]) < heap_node_val(nodes[child + 1])) {
             child++;
-        if(heap_node_val(last) >= heap_node_val(nodes[child])) break;
+        }
+        if (heap_node_val(last) >= heap_node_val(nodes[child])) break;
         nodes[i] = nodes[child];
         i = child;
     }
@@ -70,93 +72,71 @@ static inline HeapNode heap_pop(Heap *heap) {
     return result;
 }
 
-static inline int snic_superpixel_count(int d_seed) {
-    return (DIMENSION/D_SEED) * (DIMENSION/D_SEED) * (DIMENSION/D_SEED);
+#define OFFSET(z, y, x) (((uint32_t)(z) << (DIMENSION_SHIFT * 2)) | ((uint32_t)(x) << DIMENSION_SHIFT) | (y))
+
+static inline void process_neighbor(Heap* pq, const uint8_t* img, uint32_t* labels,
+                                  uint32_t k, float scale, float invwt, float ksize,
+                                  float c_over_ksize, float x_over_ksize, float y_over_ksize, float z_over_ksize,
+                                  int8_t zoff, int8_t yoff, int8_t xoff, uint8_t cz, uint8_t cy, uint8_t cx) {
+    const int32_t zz = cz + zoff;
+    const int32_t yy = cy + yoff;
+    const int32_t xx = cx + xoff;
+
+    if (zz >= 0 && zz < DIMENSION && yy >= 0 && yy < DIMENSION && xx >= 0 && xx < DIMENSION) {
+        const uint32_t ii = OFFSET(zz, yy, xx);
+        if (labels[ii] == 0) {
+            const float dc = scale * (c_over_ksize - img[ii]);
+            const float dx = x_over_ksize - xx;
+            const float dy = y_over_ksize - yy;
+            const float dz = z_over_ksize - zz;
+            const float d = (dc * dc + (dx * dx + dy * dy + dz * dz) * invwt) / ksize;
+
+            // Scale and clamp distance to 0-255 range
+            const uint8_t d_scaled = (uint8_t)fminf(255.0f, d * 64.0f);
+            heap_push(pq, (HeapNode){d_scaled, k, xx, yy, zz});
+        }
+    }
 }
 
-#define DEFINE_OFFSET(z, y, x) (((z) << (DIMENSION_SHIFT * 2)) | ((x) << DIMENSION_SHIFT) | (y))
+uint32_t snic(uint8_t* img, uint32_t* labels, Superpixel* superpixels) {
+    const float spacing = (float)DIMENSION / (DIMENSION/D_SEED);
+    const float invwt = ((DIMENSION/D_SEED) * (DIMENSION/D_SEED) * (DIMENSION/D_SEED))/(float)(IMG_SIZE);
+    const float scale = 1.0f;
+    Heap pq = heap_alloc(IMG_SIZE >> 2);
+    uint32_t k = 0;
 
-#define PROCESS_NEIGHBOR(zoff, yoff, xoff) do { \
-    const int zz = n.z + (zoff); \
-    const int yy = n.y + (yoff); \
-    const int xx = n.x + (xoff); \
-    if (zz >= 0 && zz < DIMENSION && \
-        yy >= 0 && yy < DIMENSION && \
-        xx >= 0 && xx < DIMENSION) { \
-        const int ii = DEFINE_OFFSET(zz, yy, xx); \
-        if (labels[ii] <= 0) { \
-            const float dc = scale * (c_over_ksize - img[ii]); \
-            const float dx = x_over_ksize - xx; \
-            const float dy = y_over_ksize - yy; \
-            const float dz = z_over_ksize - zz; \
-            const float d = (dc*dc + (dx*dx + dy*dy + dz*dz)*invwt) / ksize; \
-            heap_push(&pq, (HeapNode){ \
-                .d = d, \
-                .k = k, \
-                .x = xx, \
-                .y = yy, \
-                .z = zz \
-            }); \
-        } \
-    } \
-} while(0)
-
-
-unsigned int snic(unsigned char *img, unsigned int *labels, Superpixel* superpixels) {
-    float spacing = (float)DIMENSION / (float)(DIMENSION/D_SEED);
-    Heap pq = heap_alloc(IMG_SIZE*16);
-    const unsigned int numk = snic_superpixel_count(D_SEED);
-
-    for (int i = 0; i < IMG_SIZE; i++) {
+    for (uint32_t i = 0; i < IMG_SIZE; i++) {
         labels[i] = 0;
     }
-
     superpixels[0] = (Superpixel){0};
 
-    // Initialize k and filter out candidates below threshold immediately
-    unsigned int k = 0;
     for (float iz = spacing/2; iz < DIMENSION; iz += spacing) {
-        unsigned char z = (unsigned char)iz;
+        const uint8_t z = (uint8_t)iz;
         for (float iy = spacing/2; iy < DIMENSION; iy += spacing) {
-            unsigned char y = (unsigned char)iy;
+            const uint8_t y = (uint8_t)iy;
             for (float ix = spacing/2; ix < DIMENSION; ix += spacing) {
-                const int i = DEFINE_OFFSET(z, y, (unsigned char)ix);
+                const uint8_t x = (uint8_t)ix;
+                const uint32_t i = OFFSET(z, y, x);
+
                 if (img[i] >= ISO_THRESHOLD) {
-                    heap_push(&pq, (HeapNode){
-                        .d = 0.0f,
-                        .k = ++k,
-                        .x = (unsigned char)ix,
-                        .y = y,
-                        .z = z
-                    });
-                    // Initialize superpixel with the initial intensity value
-                    superpixels[k] = (Superpixel){
-                        .x = (unsigned char)ix,
-                        .y = y,
-                        .z = z,
-                        .c = img[i],
-                        .n = 1
-                    };
+                    heap_push(&pq, (HeapNode){0, ++k, x, y, z});
+                    superpixels[k] = (Superpixel){x, y, z, img[i], 1};
                 }
             }
         }
     }
 
-    const float invwt = ((DIMENSION/D_SEED) * (DIMENSION/D_SEED) * (DIMENSION/D_SEED))/(float)(IMG_SIZE);
-    const float scale = 1.0f;
-
-    // Main clustering loop
     while (pq.len > 0) {
-        HeapNode n = heap_pop(&pq);
-        const int i = DEFINE_OFFSET(n.z, n.y, n.x);
+        const HeapNode n = heap_pop(&pq);
+        const uint32_t i = OFFSET(n.z, n.y, n.x);
+
         if (labels[i] > 0) continue;
 
-        const unsigned int k = n.k;
+        const uint32_t k = n.k;
         labels[i] = k;
         Superpixel* sp = &superpixels[k];
-        const unsigned char img_val = img[i];
+        const uint8_t img_val = img[i];
 
-        // Skip processing neighbors if the average would fall below threshold
         if ((sp->c * sp->n + img_val) / (sp->n + 1) < ISO_THRESHOLD) continue;
 
         sp->c = (sp->c * sp->n + img_val) / (sp->n + 1);
@@ -166,19 +146,19 @@ unsigned int snic(unsigned char *img, unsigned int *labels, Superpixel* superpix
         sp->n++;
 
         const float ksize = (float)sp->n;
-        const float c_over_ksize = (float)sp->c;
+        const float c_over_ksize = sp->c;
         const float x_over_ksize = sp->x;
         const float y_over_ksize = sp->y;
         const float z_over_ksize = sp->z;
 
-        PROCESS_NEIGHBOR(-1,  0,  0);
-        PROCESS_NEIGHBOR( 1,  0,  0);
-        PROCESS_NEIGHBOR( 0, -1,  0);
-        PROCESS_NEIGHBOR( 0,  1,  0);
-        PROCESS_NEIGHBOR( 0,  0, -1);
-        PROCESS_NEIGHBOR( 0,  0,  1);
+        static const int8_t offsets[6][3] = {{-1,0,0}, {1,0,0}, {0,-1,0}, {0,1,0}, {0,0,-1}, {0,0,1}};
+        for (int j = 0; j < 6; j++) {
+            process_neighbor(&pq, img, labels, k, scale, invwt, ksize,
+                           c_over_ksize, x_over_ksize, y_over_ksize, z_over_ksize,
+                           offsets[j][0], offsets[j][1], offsets[j][2], n.z, n.y, n.x);
+        }
     }
 
     heap_free(&pq);
-    return k; // k is already the count of superpixels above threshold
+    return k;
 }
