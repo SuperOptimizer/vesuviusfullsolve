@@ -17,7 +17,7 @@ class Supervoxel(ctypes.Structure):
 def compile_supervoxeler():
     """Compile the Supervoxeler C code into a shared library."""
     source_path = Path(__file__).parent / "c/supervoxeler.c"
-    lib_path = Path(__file__).parent / "libsnic.so"
+    lib_path = Path(__file__).parent / "libsupervoxeler.so"
 
     compile_cmd = [
         "clang", "-O3", "-march=native", "-ffast-math",
@@ -57,7 +57,7 @@ def run_supervoxeler(volume):
     lz, ly, lx = volume.shape
 
     # Load the compiled library
-    lib = ctypes.CDLL(str(Path(__file__).parent / "libsnic.so"))
+    lib = ctypes.CDLL(str(Path(__file__).parent / "libsupervoxeler.so"))
 
     # Configure function signature
     lib.supervoxeler.argtypes = [
@@ -67,7 +67,7 @@ def run_supervoxeler(volume):
     lib.supervoxeler.restype = ctypes.c_int
 
     # Prepare output arrays
-    max_supervoxels = snic_supervoxel_count(lx, ly, lz) + 1
+    max_supervoxels = supervoxel_count(lx, ly, lz) + 1
     supervoxels = (Supervoxel * max_supervoxels)()
 
     # Run Supervoxeler
@@ -78,6 +78,6 @@ def run_supervoxeler(volume):
 
     return supervoxels, num_supervoxels
 
-def snic_supervoxel_count(lx, ly, lz):
+def supervoxel_count(lx, ly, lz):
     """Calculate the expected number of supervoxels given dimensions and seed spacing."""
     return (lx // D_SEED) * (ly // D_SEED) * (lz // D_SEED)

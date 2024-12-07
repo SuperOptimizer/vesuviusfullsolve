@@ -9,12 +9,14 @@ from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QSl
 from PyQt5.QtCore import Qt
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 import time
+
+import snic
 import supervoxeler
 from pathlib import Path
 
 
 class VolumeViewer(QMainWindow):
-    def __init__(self, centroids, values):
+    def __init__(self, centroids, values, d_seed):
         super().__init__()
         self.centroids = np.array(centroids)
         self.values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
@@ -27,6 +29,7 @@ class VolumeViewer(QMainWindow):
         self.radius_modifier = 0.0
         self.color_modifier = 0.0
         self.threshold = 0.0
+        self.d_seed = d_seed
 
         self.setup_ui()
         self.setup_vtk_objects()
@@ -63,7 +66,7 @@ class VolumeViewer(QMainWindow):
         self.glyph3D.SetSourceConnection(self.sphere.GetOutputPort())
         self.glyph3D.SetInputData(self.polydata)
         self.glyph3D.SetScaleModeToScaleByScalar()
-        self.glyph3D.SetScaleFactor(.125)
+        self.glyph3D.SetScaleFactor(.125 * self.d_seed)
         self.glyph3D.SetColorModeToColorByScalar()
 
     def setup_visualization(self):
@@ -188,9 +191,9 @@ class VolumeViewer(QMainWindow):
         self.update_visualization()
 
 
-def visualize_volume(centroids, values):
+def visualize_volume(centroids, values, d_seed):
     app = QApplication.instance() or QApplication(sys.argv)
-    viewer = VolumeViewer(centroids, values)
+    viewer = VolumeViewer(centroids, values, d_seed)
     viewer.show()
     app.exec_()
 
@@ -216,29 +219,48 @@ def process_chunk(chunk_path, output_path=None, chunk_coords=(4096, 4096, 4096),
     processed = np.ascontiguousarray(chunk)
 
     processed = pipeline.apply_glcae_3d(processed)
-    processed[processed < 96] = 0
     #processed[processed > 128+64] = 255
-    print("Running SNIC...")
-    start_time = time.time()
 
+    print("Supervoxeling ...")
+    start_time = time.time()
     # Run SNIC with fixed parameters for chunk
     supervoxels, num_supervoxels = supervoxeler.run_supervoxeler(processed)
-
-    print(f"SNIC completed in {time.time() - start_time:.2f} seconds")
+    print(f"Supervoxeling completed in {time.time() - start_time:.2f} seconds")
 
     # Extract features and adjust for chunk coordinates
-    centroids = [
+    supervoxel_centroids = [
         (sp.z + z_start, sp.y + y_start, sp.x + x_start)  # Note: changed order to match chunk coords
         for sp in supervoxels[1:]
         if sp.n > 0  # Filter out empty superpixels
     ]
-    values = np.array([sp.c for sp in supervoxels[1:] if sp.n > 0])
+    supervoxel_values = np.array([sp.c for sp in supervoxels[1:] if sp.n > 0])
 
     # Calculate and print statistics
-    print(f"Generated {len(centroids)} superpixels")
-    print(f"Average intensity: {values.mean():.2f}")
-    print(f"Intensity std: {values.std():.2f}")
-    return centroids, values
+    print(f"Generated {len(supervoxel_centroids)} supervoxels")
+    print(f"Average intensity: {supervoxel_values.mean():.2f}")
+    print(f"Intensity std: {supervoxel_values.std():.2f}")
+
+    print("Superclustering ...")
+    start_time = time.time()
+    labels, superclusters = snic.run_snic(processed)
+    print(f"Superclustering completed in {time.time() - start_time:.2f} seconds")
+
+# Extract features and adjust for chunk coordinates
+    zero_clusters = [sp for sp in superclusters[:10000] if sp.n == 0]
+    print(zero_clusters)
+    supercluster_centroids = [
+        (sp.z + z_start, sp.y + y_start, sp.x + x_start)  # Note: changed order to match chunk coords
+        for sp in superclusters[1:]
+        if sp.n > 0  # Filter out empty superpixels
+    ]
+    supercluster_values = np.array([sp.c for sp in superclusters[1:] if sp.n > 0])
+
+    # Calculate and print statistics
+    print(f"Generated {len(supercluster_centroids)} superclusters")
+    print(f"Average intensity: {supercluster_values.mean():.2f}")
+    print(f"Intensity std: {supercluster_values.std():.2f}")
+
+    return [supervoxel_centroids,supercluster_centroids], [supervoxel_values,supercluster_values]
 
 
 
@@ -252,26 +274,17 @@ if __name__ == "__main__":
     # Ensure output directory exists
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Compile SNIC
-    print("Compiling SNIC...")
-    try:
-        supervoxeler.compile_supervoxeler()
-    except Exception as e:
-        print(f"Error compiling SNIC: {e}")
-        raise
+    print("Compiling Code...")
+    supervoxeler.compile_supervoxeler()
+    snic.compile_snic()
 
-    try:
-        # Process scroll chunk
-        centroids, values = process_chunk(
-            SCROLL_PATH,
-            output_path=OUTPUT_DIR / "scroll1_chunk_results.npz"
-        )
 
-        # Visualize results if visualization function is available
-        if 'visualize_volume' in globals():
-            print("Visualizing results...")
-            visualize_volume(centroids, values)
+    # Process scroll chunk
+    centroids, values = process_chunk(SCROLL_PATH)
 
-    except Exception as e:
-        print(f"Error in main processing: {e}")
-        raise
+    # Visualize results if visualization function is available
+    if 'visualize_volume' in globals():
+        print("Visualizing results...")
+        visualize_volume(centroids[0], values[0], 2)
+
+        visualize_volume(centroids[1], values[1], 2)
