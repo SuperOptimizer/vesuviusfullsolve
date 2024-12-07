@@ -7,6 +7,11 @@
 #include <stdint.h>
 #include <time.h>
 
+#define DIMENSION 256
+#define DIMENSION_SHIFT 8  // 2^8 = 256
+#define LY_LX (DIMENSION * DIMENSION)
+#define IMG_SIZE (DIMENSION * DIMENSION * DIMENSION)
+
 typedef struct HeapNode {
   __fp16 d;
   unsigned int k;
@@ -62,19 +67,20 @@ typedef struct Superpixel {
   unsigned int n;
 } Superpixel;
 
-static inline int snic_superpixel_count(int lx, int ly, int lz, int d_seed) {
-  return (lx/d_seed) * (ly/d_seed) * (lz/d_seed);
+static inline int snic_superpixel_count(int d_seed) {
+  return (DIMENSION/d_seed) * (DIMENSION/d_seed) * (DIMENSION/d_seed);
 }
 
-#define DEFINE_OFFSET(z, y, x) ((z) * lylx + (x) * ly + (y))
+// Optimize offset calculation for 256x256x256 volume
+#define DEFINE_OFFSET(z, y, x) (((z) << (DIMENSION_SHIFT * 2)) | ((x) << DIMENSION_SHIFT) | (y))
 
 #define PROCESS_NEIGHBOR(zoff, yoff, xoff) do { \
   const int zz = n.z + (zoff); \
   const int yy = n.y + (yoff); \
   const int xx = n.x + (xoff); \
-  if (zz >= 0 && zz < lz && \
-      yy >= 0 && yy < ly && \
-      xx >= 0 && xx < lx) { \
+  if (zz >= 0 && zz < DIMENSION && \
+      yy >= 0 && yy < DIMENSION && \
+      xx >= 0 && xx < DIMENSION) { \
     const int ii = DEFINE_OFFSET(zz, yy, xx); \
     if (labels[ii] <= 0) { \
       const float dc = scale * (c_over_ksize - img[ii]); \
@@ -85,36 +91,31 @@ static inline int snic_superpixel_count(int lx, int ly, int lz, int d_seed) {
       heap_push(&pq, (HeapNode){ \
         .d = d, \
         .k = k, \
-        .x = (unsigned short)xx, \
-        .y = (unsigned short)yy, \
-        .z = (unsigned short)zz \
+        .x = xx, \
+        .y = yy, \
+        .z = zz \
       }); \
     } \
   } \
 } while(0)
 
-void snic(float *img, int lz, int ly, int lx, int d_seed, float compactness, float lowmid, float midhig, unsigned int *labels, Superpixel* superpixels) {
-  int lylx = ly * lx;
-  int img_size = lylx * lz;
+void snic(float *img, int d_seed, float compactness, unsigned int *labels, Superpixel* superpixels) {
+  // Pre-calculate constants using exact dimensions
+  float spacing = (float)DIMENSION / (float)(DIMENSION/d_seed);
 
-  // Pre-calculate constants
-  float z_spacing = (float)lz / (float)(lz/d_seed);
-  float y_spacing = (float)ly / (float)(ly/d_seed);
-  float x_spacing = (float)lx / (float)(lx/d_seed);
-
-  Heap pq = heap_alloc(img_size*16);
+  Heap pq = heap_alloc(IMG_SIZE*16);
   unsigned int numk = 0;
 
-  // Optimize seeding loop
-  for (float iz = z_spacing/2; iz < lz; iz += z_spacing) {
-    unsigned short z = (unsigned short)iz;
-    for (float iy = y_spacing/2; iy < ly; iy += y_spacing) {
-      unsigned short y = (unsigned short)iy;
-      for (float ix = x_spacing/2; ix < lx; ix += x_spacing) {
+  // Optimize seeding loop for exact dimensions
+  for (float iz = spacing/2; iz < DIMENSION; iz += spacing) {
+    unsigned char z = (unsigned char)iz;
+    for (float iy = spacing/2; iy < DIMENSION; iy += spacing) {
+      unsigned char y = (unsigned char)iy;
+      for (float ix = spacing/2; ix < DIMENSION; ix += spacing) {
         heap_push(&pq, (HeapNode){
           .d = 0.0f,
           .k = ++numk,
-          .x = (unsigned short)ix,
+          .x = (unsigned char)ix,
           .y = y,
           .z = z
         });
@@ -122,38 +123,38 @@ void snic(float *img, int lz, int ly, int lx, int d_seed, float compactness, flo
     }
   }
 
-  float invwt = (compactness*compactness*numk)/(float)(img_size);
+  float invwt = (compactness*compactness*numk)/(float)(IMG_SIZE);
   const float scale = 100.0f;
 
-while (pq.len > 0) {
-  HeapNode n = heap_pop(&pq);
-  const int i = n.z*lylx + n.x*ly + n.y;
-  if (labels[i] > 0) continue;
+  while (pq.len > 0) {
+    HeapNode n = heap_pop(&pq);
+    const int i = DEFINE_OFFSET(n.z, n.y, n.x);
+    if (labels[i] > 0) continue;
 
-  const unsigned int k = n.k;
-  labels[i] = k;
-  Superpixel* sp = &superpixels[k];
-  const float img_val = img[i];
-  sp->c += img_val;
-  sp->x += n.x;
-  sp->y += n.y;
-  sp->z += n.z;
-  sp->n++;
+    const unsigned int k = n.k;
+    labels[i] = k;
+    Superpixel* sp = &superpixels[k];
+    const float img_val = img[i];
+    sp->c += img_val;
+    sp->x += n.x;
+    sp->y += n.y;
+    sp->z += n.z;
+    sp->n++;
 
-  const float ksize = (float)sp->n;
-  const float c_over_ksize = sp->c/ksize;
-  const float x_over_ksize = sp->x/ksize;
-  const float y_over_ksize = sp->y/ksize;
-  const float z_over_ksize = sp->z/ksize;
+    const float ksize = (float)sp->n;
+    const float c_over_ksize = sp->c/ksize;
+    const float x_over_ksize = sp->x/ksize;
+    const float y_over_ksize = sp->y/ksize;
+    const float z_over_ksize = sp->z/ksize;
 
-  // Process 6 direct neighbors: front, back, left, right, up, down
-  PROCESS_NEIGHBOR(-1,  0,  0);  // back
-  PROCESS_NEIGHBOR( 1,  0,  0);  // front
-  PROCESS_NEIGHBOR( 0, -1,  0);  // left
-  PROCESS_NEIGHBOR( 0,  1,  0);  // right
-  PROCESS_NEIGHBOR( 0,  0, -1);  // down
-  PROCESS_NEIGHBOR( 0,  0,  1);  // up
-}
+    // Process 6 direct neighbors
+    PROCESS_NEIGHBOR(-1,  0,  0);
+    PROCESS_NEIGHBOR( 1,  0,  0);
+    PROCESS_NEIGHBOR( 0, -1,  0);
+    PROCESS_NEIGHBOR( 0,  1,  0);
+    PROCESS_NEIGHBOR( 0,  0, -1);
+    PROCESS_NEIGHBOR( 0,  0,  1);
+  }
 
   // Final averaging
   for (unsigned int k = 1; k <= numk; k++) {

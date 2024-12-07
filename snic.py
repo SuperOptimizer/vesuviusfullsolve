@@ -43,10 +43,6 @@ def run_snic(volume, d_seed, compactness=40.0):
         Seed spacing (controls number of superpixels)
     compactness : float
         Spatial regularization weight
-    lowmid : float
-        Threshold between low and mid intensities (0-1)
-    midhig : float
-        Threshold between mid and high intensities (0-1)
 
     Returns:
     --------
@@ -63,15 +59,15 @@ def run_snic(volume, d_seed, compactness=40.0):
 
     lz, ly, lx = volume.shape
 
+    if lz != 256 and ly != 256 and lx != 256:
+        raise Exception("must snic 256 x 256 x 256")
+
     # Load the compiled library
     lib = ctypes.CDLL(str(Path(__file__).parent / "libsnic.so"))
 
     # Configure function signature
     lib.snic.argtypes = [
         np.ctypeslib.ndpointer(dtype=np.float32),  # img
-        ctypes.c_int,  # lz
-        ctypes.c_int,  # ly
-        ctypes.c_int,  # lx
         ctypes.c_int,  # d_seed
         ctypes.c_float,  # compactness
         np.ctypeslib.ndpointer(dtype=np.uint32),  # labels
@@ -86,7 +82,7 @@ def run_snic(volume, d_seed, compactness=40.0):
 
     # Run SNIC
     lib.snic(
-        volume, lz, ly, lx, d_seed, compactness, labels, superpixels
+        volume, d_seed, compactness, labels, superpixels
     )
 
     return labels, superpixels
