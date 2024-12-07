@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <time.h>
 
-#define ISO_THRESHOLD 8
+#define ISO_THRESHOLD 1
 #define D_SEED 2
 #define DIMENSION 256
 #define DIMENSION_SHIFT 8
@@ -23,52 +23,53 @@ typedef struct HeapNode {
 
 #define heap_node_val(n) (255 - n.d)
 
-typedef struct Heap {
-    int32_t len;
-    int32_t size;
-    HeapNode* nodes;
-} Heap __attribute__((aligned(8)));
-
 typedef struct Superpixel {
     uint8_t x, y, z;
     uint8_t c;
     uint32_t n;
 } Superpixel __attribute__((aligned(8)));
 
-static inline Heap heap_alloc(int32_t size) {
-    HeapNode* nodes = (HeapNode*)malloc((size * 2 + 1) * sizeof(HeapNode));
-    return (Heap){0, size, nodes};
+typedef struct Heap {
+    int32_t len;
+    int32_t size;
+    HeapNode nodes[];  // Flexible array member
+} Heap __attribute__((aligned(8)));
+
+static inline Heap* heap_alloc(int32_t size) {
+    Heap* heap = (Heap*)malloc(sizeof(Heap) + size * sizeof(HeapNode));
+    heap->len = 0;
+    heap->size = size;
+    return heap;
 }
 
 static inline void heap_free(Heap *heap) {
-    free(heap->nodes);
+    free(heap);
 }
 
+// Update other heap functions to work with Heap* instead of Heap
 static inline void heap_push(Heap *heap, HeapNode node) {
     int32_t i = ++heap->len;
-    HeapNode* nodes = heap->nodes;
 
-    for (; i > 1 && heap_node_val(nodes[i >> 1]) < heap_node_val(node); i >>= 1) {
-        nodes[i] = nodes[i >> 1];
+    for (; i > 1 && heap_node_val(heap->nodes[i >> 1]) < heap_node_val(node); i >>= 1) {
+        heap->nodes[i] = heap->nodes[i >> 1];
     }
-    nodes[i] = node;
+    heap->nodes[i] = node;
 }
 
 static inline HeapNode heap_pop(Heap *heap) {
-    HeapNode* nodes = heap->nodes;
-    HeapNode result = nodes[1];
-    HeapNode last = nodes[heap->len--];
+    HeapNode result = heap->nodes[1];
+    HeapNode last = heap->nodes[heap->len--];
     int32_t i = 1, child;
 
     while ((child = i << 1) <= heap->len) {
-        if (child < heap->len && heap_node_val(nodes[child]) < heap_node_val(nodes[child + 1])) {
+        if (child < heap->len && heap_node_val(heap->nodes[child]) < heap_node_val(heap->nodes[child + 1])) {
             child++;
         }
-        if (heap_node_val(last) >= heap_node_val(nodes[child])) break;
-        nodes[i] = nodes[child];
+        if (heap_node_val(last) >= heap_node_val(heap->nodes[child])) break;
+        heap->nodes[i] = heap->nodes[child];
         i = child;
     }
-    nodes[i] = last;
+    heap->nodes[i] = last;
     return result;
 }
 
@@ -102,7 +103,7 @@ uint32_t snic(uint8_t* img, uint32_t* labels, Superpixel* superpixels) {
     const float spacing = (float)DIMENSION / (DIMENSION/D_SEED);
     const float invwt = ((DIMENSION/D_SEED) * (DIMENSION/D_SEED) * (DIMENSION/D_SEED))/(float)(IMG_SIZE);
     const float scale = 1.0f;
-    Heap pq = heap_alloc(IMG_SIZE >> 2);
+    Heap* pq = heap_alloc(IMG_SIZE >> 2);
     uint32_t k = 0;
 
     for (uint32_t i = 0; i < IMG_SIZE; i++) {
@@ -119,15 +120,15 @@ uint32_t snic(uint8_t* img, uint32_t* labels, Superpixel* superpixels) {
                 const uint32_t i = OFFSET(z, y, x);
 
                 if (img[i] >= ISO_THRESHOLD) {
-                    heap_push(&pq, (HeapNode){0, ++k, x, y, z});
+                    heap_push(pq, (HeapNode){0, ++k, x, y, z});
                     superpixels[k] = (Superpixel){x, y, z, img[i], 1};
                 }
             }
         }
     }
 
-    while (pq.len > 0) {
-        const HeapNode n = heap_pop(&pq);
+    while (pq->len > 0) {
+        const HeapNode n = heap_pop(pq);
         const uint32_t i = OFFSET(n.z, n.y, n.x);
 
         if (labels[i] > 0) continue;
@@ -153,12 +154,12 @@ uint32_t snic(uint8_t* img, uint32_t* labels, Superpixel* superpixels) {
 
         static const int8_t offsets[6][3] = {{-1,0,0}, {1,0,0}, {0,-1,0}, {0,1,0}, {0,0,-1}, {0,0,1}};
         for (int j = 0; j < 6; j++) {
-            process_neighbor(&pq, img, labels, k, scale, invwt, ksize,
+            process_neighbor(pq, img, labels, k, scale, invwt, ksize,
                            c_over_ksize, x_over_ksize, y_over_ksize, z_over_ksize,
                            offsets[j][0], offsets[j][1], offsets[j][2], n.z, n.y, n.x);
         }
     }
 
-    heap_free(&pq);
+    heap_free(pq);
     return k;
 }
