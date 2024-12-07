@@ -4,18 +4,8 @@ from pathlib import Path
 import subprocess
 
 
-# Match the C struct definition exactly
-class HeapNode(ctypes.Structure):
-    _fields_ = [
-        ("d", ctypes.c_float),
-        ("k", ctypes.c_uint32),
-        ("x", ctypes.c_uint16),
-        ("y", ctypes.c_uint16),
-        ("z", ctypes.c_uint16),
-        ("pad", ctypes.c_uint16)
-    ]
 
-
+D_SEED=2
 SUPERPIXEL_MAX_NEIGHS = 56 * 2
 
 
@@ -26,10 +16,6 @@ class Superpixel(ctypes.Structure):
         ("z", ctypes.c_float),
         ("c", ctypes.c_float),
         ("n", ctypes.c_uint32),
-        ("nlow", ctypes.c_uint32),
-        ("nmid", ctypes.c_uint32),
-        ("nhig", ctypes.c_uint32),
-        ("neighs", ctypes.c_uint32 * SUPERPIXEL_MAX_NEIGHS)
     ]
 
 
@@ -48,22 +34,18 @@ def compile_snic():
     return lib_path
 
 
-def run_snic(volume, d_seed, compactness=40.0, lowmid=0.3, midhig=0.7):
+def run_snic(volume):
     """
     Run SNIC superpixel segmentation on a 3D volume.
 
     Parameters:
     -----------
     volume : ndarray
-        Input 3D volume as float32 with values in [0,1]
+        Input 3D volume as uint8 with values in [0,255]
     d_seed : int
         Seed spacing (controls number of superpixels)
     compactness : float
         Spatial regularization weight
-    lowmid : float
-        Threshold between low and mid intensities (0-1)
-    midhig : float
-        Threshold between mid and high intensities (0-1)
 
     Returns:
     --------
@@ -75,8 +57,12 @@ def run_snic(volume, d_seed, compactness=40.0, lowmid=0.3, midhig=0.7):
     if not volume.flags['C_CONTIGUOUS']:
         volume = np.ascontiguousarray(volume)
 
-    if volume.dtype != np.float32:
-        volume = volume.astype(np.float32)
+    if volume.dtype != np.uint8:
+        if volume.dtype == np.float32 and volume.max() <= 1.0:
+            # Convert from float32 [0,1] to uint8 [0,255]
+            volume = (volume * 255).astype(np.uint8)
+        else:
+            raise ValueError("Input volume must be uint8 or float32 in range [0,1]")
 
     lz, ly, lx = volume.shape
 
@@ -85,14 +71,7 @@ def run_snic(volume, d_seed, compactness=40.0, lowmid=0.3, midhig=0.7):
 
     # Configure function signature
     lib.snic.argtypes = [
-        np.ctypeslib.ndpointer(dtype=np.float32),  # img
-        ctypes.c_int,  # lz
-        ctypes.c_int,  # ly
-        ctypes.c_int,  # lx
-        ctypes.c_int,  # d_seed
-        ctypes.c_float,  # compactness
-        ctypes.c_float,  # lowmid
-        ctypes.c_float,  # midhig
+        np.ctypeslib.ndpointer(dtype=np.uint8),  # img (changed from float32 to uint8)
         np.ctypeslib.ndpointer(dtype=np.uint32),  # labels
         ctypes.POINTER(Superpixel)  # superpixels
     ]
@@ -100,13 +79,12 @@ def run_snic(volume, d_seed, compactness=40.0, lowmid=0.3, midhig=0.7):
 
     # Prepare output arrays
     labels = np.zeros(volume.shape, dtype=np.uint32)
-    max_superpixels = snic_superpixel_count(lx, ly, lz, d_seed) + 1
+    max_superpixels = snic_superpixel_count(lx, ly, lz) + 1
     superpixels = (Superpixel * max_superpixels)()
 
     # Run SNIC
     neigh_overflow = lib.snic(
-        volume, lz, ly, lx, d_seed, compactness,
-        lowmid, midhig, labels, superpixels
+        volume, labels, superpixels
     )
 
     if neigh_overflow > 0:
@@ -115,6 +93,6 @@ def run_snic(volume, d_seed, compactness=40.0, lowmid=0.3, midhig=0.7):
     return labels, superpixels
 
 
-def snic_superpixel_count(lx, ly, lz, d_seed):
+def snic_superpixel_count(lx, ly, lz):
     """Calculate the expected number of superpixels given dimensions and seed spacing."""
-    return (lx // d_seed) * (ly // d_seed) * (lz // d_seed)
+    return (lx // D_SEED) * (ly // D_SEED) * (lz // D_SEED)

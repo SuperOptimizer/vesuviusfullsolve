@@ -8,17 +8,28 @@ import numpy as np
 import numpy as np
 from scipy.optimize import minimize_scalar
 
+import numpy as np
+from scipy.optimize import minimize_scalar
+
 
 def mapping3d(h, l):
+    """
+    Compute mapping function for histogram equalization.
+    Now optimized for uint8 output.
+    """
     cum_sum = 0
-    t = np.zeros_like(h, dtype=np.int32)
+    t = np.zeros_like(h, dtype=np.uint8)  # Changed to uint8
     for i in range(l):
         cum_sum += h[i]
-        t[i] = np.ceil((l - 1) * cum_sum + 0.5)
+        t[i] = np.clip(np.ceil((l - 1) * cum_sum + 0.5), 0, 255)  # Ensure uint8 range
     return t
 
 
 def f3d(lam, h_i, h_u, l):
+    """
+    Objective function for lambda optimization.
+    Unchanged as this operates on normalized histograms.
+    """
     h_tilde = 1 / (1 + lam) * h_i + lam / (1 + lam) * h_u
     t = mapping3d(h_tilde, l)
     d = 0
@@ -30,16 +41,32 @@ def f3d(lam, h_i, h_u, l):
 
 
 def apply_glcae_3d(volume, l=256):
+    """
+    Apply GLCAE to a 3D volume.
+
+    Parameters:
+    -----------
+    volume : ndarray
+        Input 3D volume as uint8 with values in [0,255]
+    l : int
+        Number of intensity levels (default 256 for uint8)
+
+    Returns:
+    --------
+    output : ndarray
+        Contrast-enhanced volume as uint8 with values in [0,255]
+    """
+    # Input validation
+    if volume.dtype != np.uint8:
+        raise ValueError("Input volume must be uint8")
+
     # Handle NaN and infinity values
-    volume = np.nan_to_num(volume, nan=0.0, posinf=0.0, neginf=0.0)
+    volume = np.nan_to_num(volume, nan=0, posinf=255, neginf=0).astype(np.uint8)
 
-    # Ensure volume is in valid range before histogram calculation
-    volume_scaled = np.clip(volume, 0, l - 1)
-
-    # Calculate histogram
-    h_i = np.bincount(volume_scaled.astype(np.uint8).flatten())
-    h_i = np.concatenate((h_i, np.zeros(l - h_i.shape[0]))) / volume_scaled.size
-    h_u = np.ones_like(h_i) * 1 / l
+    # Calculate histogram (no need for scaling since input is already uint8)
+    h_i = np.bincount(volume.flatten(), minlength=l)
+    h_i = h_i.astype(np.float32) / volume.size  # Normalize
+    h_u = np.ones_like(h_i, dtype=np.float32) * (1.0 / l)
 
     # Optimize lambda
     result = minimize_scalar(f3d, method="brent", args=(h_i, h_u, l))
@@ -48,14 +75,7 @@ def apply_glcae_3d(volume, l=256):
     h_tilde = 1 / (1 + result.x) * h_i + result.x / (1 + result.x) * h_u
     t = mapping3d(h_tilde, l)
 
-    # Apply mapping
-    mapped = np.apply_along_axis(lambda x: t[x.astype(np.uint8)], 0, volume_scaled)
-
-    # Scale output to 0-1 range as float32
-    output = mapped.astype(np.float32)
-    if output.max() != output.min():
-        output = (output - output.min()) / (output.max() - output.min())
-    else:
-        output = np.zeros_like(output, dtype=np.float32)
+    # Apply mapping (optimized for uint8)
+    output = t[volume]  # Direct indexing works since input is uint8
 
     return output
