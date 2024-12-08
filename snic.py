@@ -6,6 +6,7 @@ import subprocess
 D_SEED= 2
 DIMENSION = 256
 COMPACTNESS = 100000.0
+SUPERPIXEL_MAX_NEIGHS = 256
 
 # Match the C struct definition exactly
 class HeapNode(ctypes.Structure):
@@ -18,10 +19,6 @@ class HeapNode(ctypes.Structure):
         ("pad", ctypes.c_uint16)
     ]
 
-
-SUPERPIXEL_MAX_NEIGHS = 56 * 2
-
-
 class Superpixel(ctypes.Structure):
     _fields_ = [
         ("x", ctypes.c_float),
@@ -29,9 +26,6 @@ class Superpixel(ctypes.Structure):
         ("z", ctypes.c_float),
         ("c", ctypes.c_float),
         ("n", ctypes.c_uint32),
-        ("nlow", ctypes.c_uint32),
-        ("nmid", ctypes.c_uint32),
-        ("nhig", ctypes.c_uint32),
         ("neighs", ctypes.c_uint32 * SUPERPIXEL_MAX_NEIGHS)
     ]
 
@@ -88,7 +82,7 @@ def run_snic(volume):
 
     # Prepare output arrays
     labels = np.zeros(volume.shape, dtype=np.uint32)
-    max_superpixels = snic_superpixel_count() + 1
+    max_superpixels = snic_superpixel_count()
     superpixels = (Superpixel * int(max_superpixels))()
 
     # Run SNIC

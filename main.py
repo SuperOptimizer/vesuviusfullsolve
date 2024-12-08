@@ -78,7 +78,7 @@ class VolumeViewer(QMainWindow):
         lut = vtk.vtkLookupTable()
         lut.SetNumberOfTableValues(256)
         for i in range(256):
-            color = cm.inferno(i / 255.0)
+            color = cm.viridis(i / 255.0)
             lut.SetTableValue(i, color[0], color[1], color[2], 1.0)
         lut.Build()
 
@@ -220,6 +220,7 @@ def process_chunk(chunk_path, output_path=None, chunk_coords=(4096, 4096, 4096),
 
     processed = pipeline.apply_glcae_3d(processed)
     #processed[processed > 128+64] = 255
+    processed[processed < 128] = 0
 
     print("Supervoxeling ...")
     start_time = time.time()
@@ -230,33 +231,32 @@ def process_chunk(chunk_path, output_path=None, chunk_coords=(4096, 4096, 4096),
     # Extract features and adjust for chunk coordinates
     supervoxel_centroids = [
         (sp.z + z_start, sp.y + y_start, sp.x + x_start)  # Note: changed order to match chunk coords
-        for sp in supervoxels[1:]
+        for sp in supervoxels
         if sp.n > 0  # Filter out empty superpixels
     ]
-    supervoxel_values = np.array([sp.c for sp in supervoxels[1:] if sp.n > 0])
+    supervoxel_values = np.array([sp.c for sp in supervoxels if sp.n > 0])
 
     # Calculate and print statistics
-    print(f"Generated {len(supervoxel_centroids)} supervoxels")
+    print(f"Generated {len(supervoxel_centroids)} supervoxels from {num_supervoxels} candidates")
     print(f"Average intensity: {supervoxel_values.mean():.2f}")
     print(f"Intensity std: {supervoxel_values.std():.2f}")
 
     print("Superclustering ...")
     start_time = time.time()
     labels, superclusters = snic.run_snic(processed)
+    largest_superclusters = list(reversed(sorted(sp.n for sp in superclusters if sp.n > 0)))
     print(f"Superclustering completed in {time.time() - start_time:.2f} seconds")
-
-# Extract features and adjust for chunk coordinates
-    zero_clusters = [sp for sp in superclusters[:10000] if sp.n == 0]
-    print(zero_clusters)
+    print(largest_superclusters[:10])
+    # Extract features and adjust for chunk coordinates
     supercluster_centroids = [
         (sp.z + z_start, sp.y + y_start, sp.x + x_start)  # Note: changed order to match chunk coords
-        for sp in superclusters[1:]
+        for sp in superclusters
         if sp.n > 0  # Filter out empty superpixels
     ]
-    supercluster_values = np.array([sp.c for sp in superclusters[1:] if sp.n > 0])
+    supercluster_values = np.array([sp.c for sp in superclusters if sp.n > 0])
 
     # Calculate and print statistics
-    print(f"Generated {len(supercluster_centroids)} superclusters")
+    print(f"Generated {len(supercluster_centroids)} superclusters from {len(superclusters)} candidates")
     print(f"Average intensity: {supercluster_values.mean():.2f}")
     print(f"Intensity std: {supercluster_values.std():.2f}")
 
@@ -266,8 +266,8 @@ def process_chunk(chunk_path, output_path=None, chunk_coords=(4096, 4096, 4096),
 
 if __name__ == "__main__":
     # Set up paths
-    #SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll1/PHercParis4.volpkg/volumes_zarr_standardized/54keV_7.91um_Scroll1A.zarr/0")
-    SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/0")
+    SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll1/PHercParis4.volpkg/volumes_zarr_standardized/54keV_7.91um_Scroll1A.zarr/0")
+    #SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/1")
 
     OUTPUT_DIR = Path("output")
 

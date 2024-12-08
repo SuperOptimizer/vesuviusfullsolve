@@ -10,7 +10,7 @@
 
 #define D_SEED 2
 #define DIMENSION 256
-#define COMPACTNESS 1000.0f
+#define COMPACTNESS 10000.0f
 
 typedef float f32;
 typedef unsigned int u32;
@@ -124,7 +124,7 @@ static inline HeapNode heap_pop(Heap *heap) {
 // There isn't a theoretical maximum for SNIC neighbors. The neighbors of a cube
 // would be 26, so if compactness is high we shouldn't exceed that by too much.
 // 56 results in sizeof(Superpixel) == 4*8*8 (4 64B cachelines).
-#define SUPERPIXEL_MAX_NEIGHS (56*2)
+#define SUPERPIXEL_MAX_NEIGHS (256)
 typedef struct Superpixel {
   f32 x, y, z, c;
   u32 n;
@@ -164,36 +164,17 @@ int snic(f32 *img, u32 *labels, Superpixel* superpixels) {
   #define sqr(x) ((x)*(x))
 
   // Initialize priority queue with seeds on a grid with step D_SEED.
-  Heap pq = heap_alloc(img_size*2);
+  Heap pq = heap_alloc(img_size*8);
   u32 numk = 0;
-  for (u16 iz = D_SEED/2; iz < DIMENSION; iz += D_SEED) {
-    for (u16 iy = D_SEED/2; iy < DIMENSION; iy += D_SEED) {
-      for (u16 ix = D_SEED/2; ix < DIMENSION; ix += D_SEED) {
-        numk++;
-        // Move seeds away from edges. Not essential but should improve results.
-        u16 x = ix, y = iy, z = iz;
-        f32 grad = 9999999.0f;
-        for (u16 dz = -1; dz <= 1; dz++) {
-          for (u16 dy = -1; dy <= 1; dy++) {
-            for (u16 dx = -1; dx <= 1; dx++) {
-              u16 jx = ix+dx, jy = iy+dy, jz = iz+dz;
-              if (0 < jx && jx < DIMENSION-1 && 0 < jy && jy < DIMENSION-1 && 0 < jz && jz < DIMENSION-1) {
-                f32 gy = img[idx(jz,jy+1,jx)] - img[idx(jz,jy-1,jx)];
-                f32 gx = img[idx(jz,jy,jx+1)] - img[idx(jz,jy,jx-1)];
-                f32 gz = img[idx(jz+1,jy,jx)] - img[idx(jz-1,jy,jx)];
-                f32 jgrad = sqr(gx)+sqr(gy)+sqr(gz);
-                if (jgrad < grad) {
-                  x = jx; y = jy; z = jz;
-                  grad = jgrad;
-                }
-              }
-            }
-          }
-        }
-        heap_push(&pq, (HeapNode){.d = 0.0f, .k = numk, .x = x, .y = y, .z = z});
-      }
+  for (u16 iz = 0; iz < DIMENSION; iz += D_SEED) {
+  for (u16 iy = 0; iy < DIMENSION; iy += D_SEED) {
+    for (u16 ix = 0; ix < DIMENSION; ix += D_SEED) {
+      numk++;
+      heap_push(&pq, (HeapNode){.d = 0.0f, .k = numk, .x = ix, .y = iy, .z = iz});
     }
   }
+}
+printf("placed %d superpixel seeds\n",numk);
   if (numk == 0) {
     return 0;
   }
