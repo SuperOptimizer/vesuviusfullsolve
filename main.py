@@ -66,13 +66,17 @@ class VolumeViewer(QMainWindow):
         self.glyph3D.SetSourceConnection(self.sphere.GetOutputPort())
         self.glyph3D.SetInputData(self.polydata)
         self.glyph3D.SetScaleModeToScaleByScalar()
-        self.glyph3D.SetScaleFactor(.125 * self.d_seed)
+        self.glyph3D.SetScaleFactor(.5 * self.d_seed)
         self.glyph3D.SetColorModeToColorByScalar()
 
     def setup_visualization(self):
         self.renderer = vtk.vtkRenderer()
         self.vtk_widget.GetRenderWindow().AddRenderer(self.renderer)
         self.renderer.SetBackground(0.01, 0.01, 0.01)
+
+        # Enable shadows
+        self.renderer.SetUseShadows(1)
+        self.renderer.SetTwoSidedLighting(True)
 
         # Create lookup table
         lut = vtk.vtkLookupTable()
@@ -94,23 +98,35 @@ class VolumeViewer(QMainWindow):
         self.actor.GetProperty().SetSpecular(0.3)
         self.actor.GetProperty().SetSpecularPower(20)
 
+        # Enable shadow casting for the actor
+        #self.actor.GetProperty().ShadowOn()
+
         self.renderer.AddActor(self.actor)
 
-        light1 = vtk.vtkLight()
-        light1.SetFocalPoint(0, 0, 0)
-        light1.SetPosition(1, 1, 1)
-        light1.SetIntensity(1.2)
+        # Set ambient lighting properties on the actor
+        self.actor.GetProperty().SetAmbient(0.3)  # Add ambient component
+        self.actor.GetProperty().SetDiffuse(0.7)  # Add diffuse component
 
-        light2 = vtk.vtkLight()
-        light2.SetFocalPoint(0, 0, 0)
-        light2.SetPosition(-1, -1, -1)
-        light2.SetIntensity(1.2)
 
-        self.renderer.AddLight(light1)
-        self.renderer.AddLight(light2)
+        # Add ambient light
+        ambient_light = vtk.vtkLight()
+        ambient_light.SetLightTypeToHeadlight()  # Follows camera
+        ambient_light.SetIntensity(0.8)
+
+        lights = [ambient_light]
+
+        for light in lights:
+            if light != ambient_light:  # Don't set cone angle for ambient light
+                light.SetConeAngle(90)
+            self.renderer.AddLight(light)
 
         self.renderer.ResetCamera()
         self.vtk_widget.Initialize()
+
+        # Set shadow parameters for better performance
+        #self.renderer.SetShadowMapResolution(512)  # Lower resolution for better performance
+        #self.renderer.SetMaximumNumberOfPeels(4)  # Limit the number of transparency layers
+
 
     def update_mappings(self):
         if self.radius_modifier >= 0:
@@ -190,17 +206,23 @@ class VolumeViewer(QMainWindow):
         self.threshold = self.threshold_slider.value() / 100.0
         self.update_visualization()
 
+def extract_supervoxels_from_grid(grid_result):
+    """Extract valid supervoxels from the grid structure."""
+    centroids = []
+    values = []
 
-def visualize_volume(centroids, values, d_seed):
-    app = QApplication.instance() or QApplication(sys.argv)
-    viewer = VolumeViewer(centroids, values, d_seed)
-    viewer.show()
-    app.exec_()
+    # Process supervoxels
+    for z in range(supervoxeler.GRID_DIM):
+        for y in range(supervoxeler.GRID_DIM):
+            for x in range(supervoxeler.GRID_DIM):
+                sv = grid_result[z, y, x]
+                if sv['n'] > 0 and sv['c'] > 0:
+                    centroids.append((sv['z'], sv['y'], sv['x']))
+                    values.append(sv['c'])
 
-
+    return centroids, np.array(values)
 
 def process_chunk(chunk_path, output_path=None, chunk_coords=(4096, 4096, 4096), chunk_size=256):
-
     print("Reading chunk...")
     scroll = zarr.open(chunk_path, mode="r")
 
@@ -215,59 +237,66 @@ def process_chunk(chunk_path, output_path=None, chunk_coords=(4096, 4096, 4096),
             ]
 
     print("Processing volume...")
-
     processed = np.ascontiguousarray(chunk)
-
     processed = pipeline.apply_glcae_3d(processed)
-    #processed[processed > 128+64] = 255
-    processed[processed < 128] = 0
+    processed[processed < 64] = 0
 
     print("Supervoxeling ...")
     start_time = time.time()
-    # Run SNIC with fixed parameters for chunk
-    supervoxels, num_supervoxels = supervoxeler.run_supervoxeler(processed)
+    # Run supervoxeler with grid-based structure
+    grid_result = supervoxeler.run_supervoxeler(processed)
     print(f"Supervoxeling completed in {time.time() - start_time:.2f} seconds")
 
-    # Extract features and adjust for chunk coordinates
-    supervoxel_centroids = [
-        (sp.z + z_start, sp.y + y_start, sp.x + x_start)  # Note: changed order to match chunk coords
-        for sp in supervoxels
-        if sp.n > 0  # Filter out empty superpixels
-    ]
-    supervoxel_values = np.array([sp.c for sp in supervoxels if sp.n > 0])
+    # Extract valid supervoxels
+    supervoxel_centroids, supervoxel_values = extract_supervoxels_from_grid(grid_result)
 
     # Calculate and print statistics
-    print(f"Generated {len(supervoxel_centroids)} supervoxels from {num_supervoxels} candidates")
-    print(f"Average intensity: {supervoxel_values.mean():.2f}")
-    print(f"Intensity std: {supervoxel_values.std():.2f}")
+    print(f"Generated {len(supervoxel_centroids)} supervoxels")
+    if len(supervoxel_values) > 0:
+        print(f"Average intensity: {supervoxel_values.mean():.2f}")
+        print(f"Intensity std: {supervoxel_values.std():.2f}")
 
     print("Superclustering ...")
     start_time = time.time()
     labels, superclusters = snic.run_snic(processed)
-    largest_superclusters = list(reversed(sorted(sp.n for sp in superclusters if sp.n > 0)))
     print(f"Superclustering completed in {time.time() - start_time:.2f} seconds")
-    print(largest_superclusters[:10])
-    # Extract features and adjust for chunk coordinates
-    supercluster_centroids = [
-        (sp.z + z_start, sp.y + y_start, sp.x + x_start)  # Note: changed order to match chunk coords
-        for sp in superclusters
-        if sp.n > 0  # Filter out empty superpixels
-    ]
-    supercluster_values = np.array([sp.c for sp in superclusters if sp.n > 0])
+
+    # Filter superclusters
+    superclusters = [sp for sp in superclusters
+                    if sp.n > 0 and sp.c > 0]
+
+    supercluster_centroids = [(sp.z, sp.y, sp.x) for sp in superclusters]
+    supercluster_values = np.array([sp.c for sp in superclusters])
 
     # Calculate and print statistics
-    print(f"Generated {len(supercluster_centroids)} superclusters from {len(superclusters)} candidates")
-    print(f"Average intensity: {supercluster_values.mean():.2f}")
-    print(f"Intensity std: {supercluster_values.std():.2f}")
+    print(f"Generated {len(supercluster_centroids)} superclusters")
+    if len(supercluster_values) > 0:
+        print(f"Average intensity: {supercluster_values.mean():.2f}")
+        print(f"Intensity std: {supercluster_values.std():.2f}")
 
-    return [supervoxel_centroids,supercluster_centroids], [supervoxel_values,supercluster_values]
-
-
+    return [supervoxel_centroids, supercluster_centroids], [supervoxel_values, supercluster_values]
 
 if __name__ == "__main__":
+    import sys
+    from PyQt5.QtWidgets import QApplication
+    import zarr
+    import time
+    import pipeline
+    import supervoxeler
+    import snic
+    from pathlib import Path
+
+    def visualize_volume(centroids, values, d_seed):
+        app = QApplication.instance() or QApplication(sys.argv)
+        viewer = VolumeViewer(centroids, values, d_seed)
+        viewer.show()
+        app.exec_()
+
     # Set up paths
-    SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll1/PHercParis4.volpkg/volumes_zarr_standardized/54keV_7.91um_Scroll1A.zarr/0")
-    #SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/1")
+    # keep if commented out
+    # SCROLL_PATH = Path("/Users/forrest/dl.ash2txt.org/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/1")
+    #SCROLL_PATH = Path("/Users/forrest/dl.ash2txt.org/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/1")
+    SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/0")
 
     OUTPUT_DIR = Path("output")
 
@@ -278,7 +307,6 @@ if __name__ == "__main__":
     supervoxeler.compile_supervoxeler()
     snic.compile_snic()
 
-
     # Process scroll chunk
     centroids, values = process_chunk(SCROLL_PATH)
 
@@ -286,5 +314,4 @@ if __name__ == "__main__":
     if 'visualize_volume' in globals():
         print("Visualizing results...")
         visualize_volume(centroids[0], values[0], 2)
-
-        visualize_volume(centroids[1], values[1], 2)
+        visualize_volume(centroids[1], values[1], 8)
