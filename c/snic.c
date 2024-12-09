@@ -1,206 +1,82 @@
-#include <sys/mman.h>
-#include <fcntl.h>
-#include <unistd.h>
+
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <time.h>
-#include <string.h>
 
-#define D_SEED 8
-#define DIMENSION 256
-#define COMPACTNESS 1000.0f
-
-typedef float f32;
-typedef unsigned int u32;
-typedef unsigned short u16;
+#include "common.h"
+#include "snic.h"
 
 typedef struct HeapNode {
-    f32 d;      // distance/priority
-    u32 k;      // superpixel index
-    u16 x, y, z; // coordinates
+  f32 d;
+  u32 k;
+  u16 z, y, x;
 } HeapNode;
 
+#define heap_node_val(n)  (-n.d)
+
 typedef struct Heap {
-    int len;
-    int capacity;
-    HeapNode* nodes;
+  int len, size;
+  HeapNode* nodes;
 } Heap;
 
-// Optimized initial heap size calculation
-static inline int calculate_initial_heap_size() {
-    // Instead of allocating for full image size * 8, we calculate based on active frontier
-    // Maximum frontier size is approximately 6 * current_layer_size
-    // For 3D grid with step D_SEED, calculate max active frontier
-    int layer_size = (DIMENSION / D_SEED) * (DIMENSION / D_SEED);
-    int max_frontier = 6 * layer_size; // 6 faces of expansion
+#define heap_left(i)  (2*(i))
+#define heap_right(i) (2*(i)+1)
+#define heap_parent(i) ((i)/2)
+#define heap_fix_edge(heap, i, j) \
+  if (heap_node_val(heap->nodes[j]) > heap_node_val(heap->nodes[i])) { \
+    HeapNode tmp = heap->nodes[j]; \
+    heap->nodes[j] = heap->nodes[i]; \
+    heap->nodes[i] = tmp; \
+  }
 
-    // Add 20% buffer for safety
-    return (int)(max_frontier * 1.2);
+static Heap heap_alloc(int size) {
+  return (Heap){.len = 0, .size = size, .nodes = (HeapNode*)calloc(size*2, sizeof(HeapNode))};
 }
 
-static inline size_t round_to_page_size(size_t size) {
-    long page_size = sysconf(_SC_PAGESIZE);
-    return (size + page_size - 1) & ~(page_size - 1);
+static void heap_free(Heap *heap) {
+  free(heap->nodes);
 }
 
-static inline Heap heap_alloc(int suggested_capacity) {
-    int initial_capacity = calculate_initial_heap_size();
-    // Use the larger of calculated size or suggested capacity
-    initial_capacity = initial_capacity > suggested_capacity ? initial_capacity : suggested_capacity;
-
-    // Round to power of 2 for efficient resizing
-    initial_capacity = 1 << (32 - __builtin_clz(initial_capacity - 1));
-
-    size_t alloc_size = round_to_page_size(initial_capacity * sizeof(HeapNode));
-    printf("Initial heap allocation: %zu bytes (capacity: %d nodes)\n",
-           alloc_size, initial_capacity);
-
-    HeapNode* nodes = (HeapNode*)mmap(
-        NULL,
-        alloc_size,
-        PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | MAP_ANONYMOUS,
-        -1,
-        0
-    );
-
-    if (nodes == MAP_FAILED) {
-        perror("mmap failed");
-        return (Heap){0};
-    }
-
-    nodes[0] = (HeapNode){0};
-    return (Heap){.len = 0, .capacity = initial_capacity, .nodes = nodes};
+static void heap_push(Heap *heap, HeapNode node) {
+  heap->len++;
+  heap->nodes[heap->len] = node;
+  for (int i = heap->len, j = 0; i > 1; i = j) {
+    j = heap_parent(i);
+    heap_fix_edge(heap, j, i) else break;
+  }
 }
 
-// Rest of heap implementation remains similar but with more aggressive shrinking
-static inline int heap_resize(Heap *heap, int new_capacity) {
-    // More aggressive shrinking threshold
-    if (new_capacity < heap->capacity && heap->len < heap->capacity / 8) {
-        new_capacity = heap->capacity / 2;
+static HeapNode heap_pop(Heap *heap) {
+  HeapNode node = heap->nodes[1];
+  heap->len--;
+  heap->nodes[1] = heap->nodes[heap->len+1];
+  for (int i = 1, j = 0; i <= heap->len; i = j) {
+    int l = heap_left(i);
+    int r = heap_right(i);
+    if (l > heap->len) {
+      break;
     }
-
-    new_capacity = 1 << (32 - __builtin_clz(new_capacity - 1));
-    size_t new_size = round_to_page_size(new_capacity * sizeof(HeapNode));
-
-    HeapNode* new_nodes = (HeapNode*)mmap(
-        NULL,
-        new_size,
-        PROT_READ | PROT_WRITE,
-        MAP_PRIVATE | MAP_ANONYMOUS,
-        -1,
-        0
-    );
-
-    if (new_nodes == MAP_FAILED) {
-        perror("mmap failed during resize");
-        return 0;
+    j = l;
+    if (r <= heap->len && heap_node_val(heap->nodes[l]) < heap_node_val(heap->nodes[r])) {
+      j = r;
+    } else {
     }
+    heap_fix_edge(heap, i, j) else break;
+  }
 
-    memcpy(new_nodes, heap->nodes, (heap->len + 1) * sizeof(HeapNode));
-
-    size_t old_size = round_to_page_size(heap->capacity * sizeof(HeapNode));
-    if (munmap(heap->nodes, old_size) == -1) {
-        perror("munmap failed during resize");
-        munmap(new_nodes, new_size);
-        return 0;
-    }
-
-    heap->nodes = new_nodes;
-    heap->capacity = new_capacity;
-    return 1;
+  return node;
 }
 
-// Optimized heap operations
-#define heap_parent(i) ((i) >> 1)
-#define heap_left(i) ((i) << 1)
-#define heap_right(i) (((i) << 1) | 1)
-#define heap_node_val(n) (-n.d)
+#undef heap_left
+#undef heap_right
+#undef heap_parent
+#undef heap_fix_edge
 
-static inline void heap_push(Heap *heap, HeapNode node) {
-    if (heap->len + 1 >= heap->capacity) {
-        if (!heap_resize(heap, heap->capacity * 2)) {
-            printf("Failed to grow heap\n");
-            return;
-        }
-    }
 
-    int i = ++heap->len;
-    while (i > 1) {
-        int p = heap_parent(i);
-        if (heap_node_val(heap->nodes[p]) >= heap_node_val(node)) break;
-        heap->nodes[i] = heap->nodes[p];
-        i = p;
-    }
-    heap->nodes[i] = node;
-}
-
-static inline HeapNode heap_pop(Heap *heap) {
-    if (heap->len == 0) return (HeapNode){0};
-
-    HeapNode result = heap->nodes[1];
-    HeapNode last = heap->nodes[heap->len--];
-
-    // More aggressive shrinking
-    if (heap->len > 0 && heap->len < heap->capacity / 8) {
-        heap_resize(heap, heap->capacity / 2);
-    }
-
-    int i = 1;
-    while (1) {
-        int largest = i;
-        int l = heap_left(i);
-        int r = heap_right(i);
-
-        if (l <= heap->len && heap_node_val(heap->nodes[l]) > heap_node_val(last)) largest = l;
-        if (r <= heap->len && heap_node_val(heap->nodes[r]) > heap_node_val(heap->nodes[largest])) largest = r;
-
-        if (largest == i) break;
-
-        heap->nodes[i] = heap->nodes[largest];
-        i = largest;
-    }
-    heap->nodes[i] = last;
-
-    return result;
-}
-
-static inline void heap_free(Heap *heap) {
-    if (heap->nodes) {
-        size_t alloc_size = round_to_page_size((size_t)heap->capacity * sizeof(HeapNode));
-        if (munmap(heap->nodes, alloc_size) == -1) {
-            perror("munmap failed");
-        }
-        heap->nodes = NULL;
-        heap->len = 0;
-        heap->capacity = 0;
-    }
-}
-
-// SNIC ////////////////////////////////////////////////////////////////////////
-
-// This is based on the paper and the code from:
-// - https://www.epfl.ch/labs/ivrl/research/snic-superpixels/
-// - https://github.com/achanta/SNIC/
-
-// There isn't a theoretical maximum for SNIC neighbors. The neighbors of a cube
-// would be 26, so if compactness is high we shouldn't exceed that by too much.
-// 56 results in sizeof(Superpixel) == 4*8*8 (4 64B cachelines).
-#define SUPERPIXEL_MAX_NEIGHS (64)
-typedef struct Superpixel {
-  f32 x, y, z, c;
-  u32 n;
-  u32 neighs[SUPERPIXEL_MAX_NEIGHS];
-} Superpixel;
-
-int snic_superpixel_max_neighs()  {
-  return SUPERPIXEL_MAX_NEIGHS;
-}
-
-int superpixel_add_neighbors(Superpixel *superpixels, u32 k1, u32 k2) {
+static int superpixel_add_neighbors(Superpixel *superpixels, u32 k1, u32 k2) {
   int i = 0;
   for (; i < SUPERPIXEL_MAX_NEIGHS; i++) {
     if (superpixels[k1].neighs[i] == 0) {
@@ -213,126 +89,153 @@ int superpixel_add_neighbors(Superpixel *superpixels, u32 k1, u32 k2) {
   return 1;
 }
 
-int snic_superpixel_count()  {
-  int cz = (DIMENSION - D_SEED/2 + D_SEED - 1)/D_SEED;
-  int cy = (DIMENSION - D_SEED/2 + D_SEED - 1)/D_SEED;
-  int cx = (DIMENSION - D_SEED/2 + D_SEED - 1)/D_SEED;
-  return cx*cy*cz;
+static inline void process_neighbor(
+    int ndz, int ndy, int ndx, int ioffset,
+    HeapNode n, int i,
+    const u8* img, u32* labels, Superpixel* superpixels,
+    u32 k, f32 invwt, Heap* pq, int* neigh_overflow, u32 lz, u32 ly, u32 lx
+) {
+    int xx = n.x + ndx;
+    int yy = n.y + ndy;
+    int zz = n.z + ndz;
+
+#define sqr(x) ((x)*(x))
+
+    if (0 <= xx && xx < lz && 0 <= yy && yy < ly && 0 <= zz && zz < lx) {
+        int ii = i + ioffset;
+        if (labels[ii] <= 0) {
+            f32 ksize = (f32)superpixels[k].n;
+            f32 dc = sqr(255.0f*(superpixels[k].c - (img[ii]*ksize)));
+            f32 dx = superpixels[k].x - xx*ksize;
+            f32 dy = superpixels[k].y - yy*ksize;
+            f32 dz = superpixels[k].z - zz*ksize;
+            f32 dpos = sqr(dx) + sqr(dy) + sqr(dz);
+            f32 d = (dc + dpos*invwt) / (ksize*ksize);
+            heap_push(pq, (HeapNode){.d = d, .k = k, .x = (u16)xx, .y = (u16)yy, .z = (u16)zz});
+        } else if (k != labels[ii]) {
+            *neigh_overflow += superpixel_add_neighbors(superpixels, k, labels[ii]);
+            *neigh_overflow += superpixel_add_neighbors(superpixels, labels[ii], k);
+        }
+    }
 }
 
-// Modified SNIC implementation with optimized neighbor selection
-int snic(f32 *img, u32 *labels, Superpixel* superpixels) {
-    int neigh_overflow = 0;
-    int lylx = DIMENSION * DIMENSION;
-    int img_size = lylx * DIMENSION;
-    #define idx(z, y, x) ((z)*lylx + (x)*DIMENSION + (y))
-    #define sqr(x) ((x)*(x))
+int snic(const u8* img, u16 lz, u16 ly, u16 lx, u32 d_seed, f32 compactness, u32* labels, Superpixel* superpixels) {
+  int neigh_overflow = 0;
+  int lylx = ly * lx;
+  int img_size = lz * ly * lx;
+  #define idx(z, y, x) ((z)*lylx + (x)*lx + (y))
+  #define sqr(x) ((x)*(x))
 
-    // Initialize priority queue with seeds on a grid
-    Heap pq = heap_alloc(256*256*256); // Start small, will grow as needed
-    u32 numk = 0;
-    for (u16 iz = 0; iz < DIMENSION; iz += D_SEED) {
-        for (u16 iy = 0; iy < DIMENSION; iy += D_SEED) {
-            for (u16 ix = 0; ix < DIMENSION; ix += D_SEED) {
-                numk++;
-                heap_push(&pq, (HeapNode){.d = 0.0f, .k = numk, .x = ix, .y = iy, .z = iz});
-            }
-        }
+  // Structure to store neighbor information temporarily
+  typedef struct {
+    float dist;
+    int dz, dy, dx;
+    int offset;
+  } NeighborInfo;
+
+  Heap pq = heap_alloc(img_size);
+  u32 numk = 0;
+  for (u16 iz = 0; iz < lz; iz += d_seed) {
+    for (u16 iy = 0; iy < ly; iy += d_seed) {
+      for (u16 ix = 0; ix < lx; ix += d_seed) {
+        numk++;
+        u16 x = ix, y = iy, z = iz;
+        heap_push(&pq, (HeapNode){.d = 0.0f, .k = numk, .x = x, .y = y, .z = z});
+      }
     }
-    printf("placed %d superpixel seeds\n", numk);
+  }
+  if (numk == 0) {
+    return 0;
+  }
 
-    f32 invwt = (COMPACTNESS*COMPACTNESS*numk)/(f32)(img_size);
+  f32 invwt = compactness * compactness * (f32)numk / (f32)img_size;
 
-    // Temporary storage for neighbor evaluation
-    typedef struct {
-        f32 d;
-        u16 x, y, z;
-    } NeighborInfo;
-    NeighborInfo neighbors[6]; // For 6-connectivity
+  // Array to store neighbor information
+  NeighborInfo neighbors[26];
 
-    while (pq.len > 0) {
-        HeapNode n = heap_pop(&pq);
-        int i = idx(n.z, n.y, n.x);
-        if (labels[i] > 0) continue;
+  while (pq.len > 0) {
+    HeapNode n = heap_pop(&pq);
+    int i = idx(n.z, n.y, n.x);
+    if (labels[i] > 0) continue;
 
-        u32 k = n.k;
-        labels[i] = k;
-        superpixels[k].c += img[i];
-        superpixels[k].x += n.x;
-        superpixels[k].y += n.y;
-        superpixels[k].z += n.z;
-        superpixels[k].n += 1;
+    u32 k = n.k;
+    labels[i] = k;
+    superpixels[k].c += (f32)img[i];
+    superpixels[k].x += (f32)n.x;
+    superpixels[k].y += (f32)n.y;
+    superpixels[k].z += (f32)n.z;
+    superpixels[k].n += 1;
 
-        // Evaluate all neighbors first
-        int num_neighbors = 0;
-        #define eval_neigh(ndz, ndy, ndx, ioffset) { \
-            int xx = n.x + ndx; int yy = n.y + ndy; int zz = n.z + ndz; \
-            if (0 <= xx && xx < DIMENSION && 0 <= yy && yy < DIMENSION && 0 <= zz && zz < DIMENSION) { \
-                int ii = i + ioffset; \
-                if (labels[ii] <= 0) { \
-                    f32 ksize = (f32)superpixels[k].n; \
-                    f32 dc = sqr(100.0f*(superpixels[k].c - (img[ii]*ksize))); \
-                    f32 dx = superpixels[k].x - xx*ksize; \
-                    f32 dy = superpixels[k].y - yy*ksize; \
-                    f32 dz = superpixels[k].z - zz*ksize; \
-                    f32 dpos = sqr(dx) + sqr(dy) + sqr(dz); \
-                    f32 d = (dc + dpos*invwt) / (ksize*ksize); \
-                    neighbors[num_neighbors++] = (NeighborInfo){.d = d, .x = xx, .y = yy, .z = zz}; \
-                } else if (k != labels[ii]) { \
-                    neigh_overflow += superpixel_add_neighbors(superpixels, k, labels[ii]); \
-                    neigh_overflow += superpixel_add_neighbors(superpixels, labels[ii], k); \
-                } \
-            } \
+    // First, check all 26 neighbors and store their information
+    int neighbor_count = 0;
+    for (int dz = -1; dz <= 1; dz++) {
+      for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+          // Skip the center point
+          if (dz == 0 && dy == 0 && dx == 0) continue;
+
+          // Check if neighbor is within bounds
+          if (n.z + dz < 0 || n.z + dz >= lz ||
+              n.y + dy < 0 || n.y + dy >= ly ||
+              n.x + dx < 0 || n.x + dx >= lx) continue;
+
+          int offset = dz * lylx + dx * lx + dy;
+          int ni = i + offset;
+
+          // Skip if already labeled
+          if (labels[ni] > 0) continue;
+
+          // Calculate distance metric (same as in process_neighbor)
+          f32 dc = (f32)img[ni] - (f32)img[i];
+          f32 dx_dist = (f32)dx;
+          f32 dy_dist = (f32)dy;
+          f32 dz_dist = (f32)dz;
+          f32 ds = sqr(dx_dist) + sqr(dy_dist) + sqr(dz_dist);
+          f32 dist = sqr(dc) + ds * invwt;
+
+          neighbors[neighbor_count] = (NeighborInfo){
+            .dist = dist,
+            .dz = dz,
+            .dy = dy,
+            .dx = dx,
+            .offset = offset
+          };
+          neighbor_count++;
         }
-
-        eval_neigh( 0,  1,  0,    1);
-        eval_neigh( 0, -1,  0,   -1);
-        eval_neigh( 0,  0,  1,    DIMENSION);
-        eval_neigh( 0,  0, -1,   -DIMENSION);
-        eval_neigh( 1,  0,  0,    lylx);
-        eval_neigh(-1,  0,  0,   -lylx);
-
-        // Only add the best N neighbors to the heap
-        // Here we're selecting the 2 best neighbors (can be tuned)
-        #define BEST_NEIGHBORS  2
-        for (int j = 0; j < num_neighbors && j < BEST_NEIGHBORS; j++) {
-            // Find best remaining neighbor
-            int best_idx = j;
-            f32 best_d = neighbors[j].d;
-            for (int m = j + 1; m < num_neighbors; m++) {
-                if (neighbors[m].d < best_d) {
-                    best_d = neighbors[m].d;
-                    best_idx = m;
-                }
-            }
-            // Swap if needed
-            if (best_idx != j) {
-                NeighborInfo tmp = neighbors[j];
-                neighbors[j] = neighbors[best_idx];
-                neighbors[best_idx] = tmp;
-            }
-            // Add to heap
-            heap_push(&pq, (HeapNode){
-                .d = neighbors[j].d,
-                .k = k,
-                .x = neighbors[j].x,
-                .y = neighbors[j].y,
-                .z = neighbors[j].z
-            });
-        }
+      }
     }
 
-    // Finalize superpixel centers
-    for (u32 k = 1; k <= numk; k++) {
-        f32 ksize = (f32)superpixels[k].n;
-        superpixels[k].c /= ksize;
-        superpixels[k].x /= ksize;
-        superpixels[k].y /= ksize;
-        superpixels[k].z /= ksize;
+    // Sort neighbors by distance (simple bubble sort since we only need top 6)
+    for (int i = 0; i < 6 && i < neighbor_count; i++) {
+      for (int j = i + 1; j < neighbor_count; j++) {
+        if (neighbors[j].dist < neighbors[i].dist) {
+          NeighborInfo temp = neighbors[i];
+          neighbors[i] = neighbors[j];
+          neighbors[j] = temp;
+        }
+      }
     }
 
-    #undef sqr
-    #undef idx
-    heap_free(&pq);
-    return neigh_overflow;
+    // Process only the closest 6 neighbors (or fewer if there aren't 6 valid neighbors)
+    int num_to_process = (neighbor_count < 6) ? neighbor_count : 6;
+    for (int j = 0; j < num_to_process; j++) {
+      NeighborInfo* neigh = &neighbors[j];
+      process_neighbor(neigh->dz, neigh->dy, neigh->dx, neigh->offset,
+                      n, i, img, labels, superpixels, k, invwt,
+                      &pq, &neigh_overflow, lz, ly, lx);
+    }
+  }
+
+  for (u32 k = 1; k <= numk; k++) {
+    f32 ksize = (f32)superpixels[k].n;
+    superpixels[k].c /= ksize;
+    superpixels[k].x /= ksize;
+    superpixels[k].y /= ksize;
+    superpixels[k].z /= ksize;
+  }
+
+  #undef sqr
+  #undef idx
+  heap_free(&pq);
+  return neigh_overflow;
 }
