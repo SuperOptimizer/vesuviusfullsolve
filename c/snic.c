@@ -9,11 +9,21 @@
 #include "common.h"
 #include "snic.h"
 
+typedef struct NeighborNode {
+  f32 d;
+  u16 x, y, z;
+} NeighborNode;
+
+#define idx(z, y, x) ((z)*lylx + (x)*lx + (y))
+#define sqr(x) ((x)*(x))
+
 typedef struct HeapNode {
   f32 d;
   u32 k;
   u16 z, y, x;
 } HeapNode;
+
+
 
 #define heap_node_val(n)  (-n.d)
 
@@ -33,11 +43,30 @@ typedef struct Heap {
   }
 
 static Heap heap_alloc(int size) {
-  return (Heap){.len = 0, .size = size, .nodes = (HeapNode*)calloc(size*2, sizeof(HeapNode))};
+  size_t total_size = size * 2 * 2 * 2 * sizeof(HeapNode);
+  void* mem = mmap(NULL, total_size,
+                   PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS,
+                   -1, 0);
+
+  if (mem == MAP_FAILED) {
+    // Handle allocation failure
+    return (Heap){.len = 0, .size = 0, .nodes = NULL};
+  }
+
+  return (Heap){
+    .len = 0,
+    .size = size,
+    .nodes = (HeapNode*)mem
+  };
 }
 
 static void heap_free(Heap *heap) {
-  free(heap->nodes);
+  if (heap->nodes) {
+    size_t total_size = heap->size * 2 * 2 * 2 * sizeof(HeapNode);
+    munmap(heap->nodes, total_size);
+    heap->nodes = NULL;
+  }
 }
 
 static void heap_push(Heap *heap, HeapNode node) {
@@ -76,71 +105,27 @@ static HeapNode heap_pop(Heap *heap) {
 #undef heap_fix_edge
 
 
-static int superpixel_add_neighbors(Superpixel *superpixels, u32 k1, u32 k2) {
-  int i = 0;
-  for (; i < SUPERPIXEL_MAX_NEIGHS; i++) {
-    if (superpixels[k1].neighs[i] == 0) {
-      superpixels[k1].neighs[i] = k2;
-      return 0;
-    } else if (superpixels[k1].neighs[i] == k2) {
-      return 0;
-    }
-  }
-  return 1;
-}
-
-static inline void process_neighbor(
-    int ndz, int ndy, int ndx, int ioffset,
-    HeapNode n, int i,
-    const u8* img, u32* labels, Superpixel* superpixels,
-    u32 k, f32 invwt, Heap* pq, int* neigh_overflow, u32 lz, u32 ly, u32 lx
-) {
-    int xx = n.x + ndx;
-    int yy = n.y + ndy;
-    int zz = n.z + ndz;
-
-#define sqr(x) ((x)*(x))
-
-    if (0 <= xx && xx < lz && 0 <= yy && yy < ly && 0 <= zz && zz < lx) {
-        int ii = i + ioffset;
-        if (labels[ii] <= 0) {
-            f32 ksize = (f32)superpixels[k].n;
-            f32 dc = sqr(255.0f*(superpixels[k].c - (img[ii]*ksize)));
-            f32 dx = superpixels[k].x - xx*ksize;
-            f32 dy = superpixels[k].y - yy*ksize;
-            f32 dz = superpixels[k].z - zz*ksize;
-            f32 dpos = sqr(dx) + sqr(dy) + sqr(dz);
-            f32 d = (dc + dpos*invwt) / (ksize*ksize);
-            heap_push(pq, (HeapNode){.d = d, .k = k, .x = (u16)xx, .y = (u16)yy, .z = (u16)zz});
-        } else if (k != labels[ii]) {
-            *neigh_overflow += superpixel_add_neighbors(superpixels, k, labels[ii]);
-            *neigh_overflow += superpixel_add_neighbors(superpixels, labels[ii], k);
-        }
-    }
-}
 
 int snic(const u8* img, u16 lz, u16 ly, u16 lx, u32 d_seed, f32 compactness, u32* labels, Superpixel* superpixels) {
-  int neigh_overflow = 0;
   int lylx = ly * lx;
   int img_size = lz * ly * lx;
-  #define idx(z, y, x) ((z)*lylx + (x)*lx + (y))
-  #define sqr(x) ((x)*(x))
-
-  // Structure to store neighbor information temporarily
-  typedef struct {
-    float dist;
-    int dz, dy, dx;
-    int offset;
-  } NeighborInfo;
-
   Heap pq = heap_alloc(img_size);
   u32 numk = 0;
+
+for (int z = 0; z < lz; z++) {
+  for (int y = 0; y < ly; y++) {
+    for (int x = 0; x < lx; x++) {
+      labels[idx(z,y,x)] = 0;
+    }
+  }
+}
+
+  // Initial seeds remain the same
   for (u16 iz = 0; iz < lz; iz += d_seed) {
     for (u16 iy = 0; iy < ly; iy += d_seed) {
       for (u16 ix = 0; ix < lx; ix += d_seed) {
         numk++;
-        u16 x = ix, y = iy, z = iz;
-        heap_push(&pq, (HeapNode){.d = 0.0f, .k = numk, .x = x, .y = y, .z = z});
+        heap_push(&pq, (HeapNode){.d = 0.0f, .k = numk, .x = ix, .y = iy, .z = iz});
       }
     }
   }
@@ -150,12 +135,13 @@ int snic(const u8* img, u16 lz, u16 ly, u16 lx, u32 d_seed, f32 compactness, u32
 
   f32 invwt = compactness * compactness * (f32)numk / (f32)img_size;
 
-  // Array to store neighbor information
-  NeighborInfo neighbors[26];
+  // Temporary array to store and sort neighbors
+  NeighborNode neighbors[26];  // Still need space for all neighbors to find best N
 
   while (pq.len > 0) {
     HeapNode n = heap_pop(&pq);
     int i = idx(n.z, n.y, n.x);
+
     if (labels[i] > 0) continue;
 
     u32 k = n.k;
@@ -166,66 +152,69 @@ int snic(const u8* img, u16 lz, u16 ly, u16 lx, u32 d_seed, f32 compactness, u32
     superpixels[k].z += (f32)n.z;
     superpixels[k].n += 1;
 
-    // First, check all 26 neighbors and store their information
+    // Find all valid neighbors first
     int neighbor_count = 0;
     for (int dz = -1; dz <= 1; dz++) {
       for (int dy = -1; dy <= 1; dy++) {
         for (int dx = -1; dx <= 1; dx++) {
-          // Skip the center point
           if (dz == 0 && dy == 0 && dx == 0) continue;
 
-          // Check if neighbor is within bounds
-          if (n.z + dz < 0 || n.z + dz >= lz ||
-              n.y + dy < 0 || n.y + dy >= ly ||
-              n.x + dx < 0 || n.x + dx >= lx) continue;
+          int xx = n.x + dx;
+          int yy = n.y + dy;
+          int zz = n.z + dz;
+
+          if (xx < 0 || xx >= lx || yy < 0 || yy >= ly || zz < 0 || zz >= lz)
+            continue;
 
           int offset = dz * lylx + dx * lx + dy;
           int ni = i + offset;
 
-          // Skip if already labeled
-          if (labels[ni] > 0) continue;
+          if (labels[ni] <= 0) {
+            f32 ksize = (f32)superpixels[k].n;
+            f32 dc = sqr(255.0f*(superpixels[k].c - (img[ni]*ksize)));
+            f32 dx_pos = superpixels[k].x - xx*ksize;
+            f32 dy_pos = superpixels[k].y - yy*ksize;
+            f32 dz_pos = superpixels[k].z - zz*ksize;
+            f32 dpos = sqr(dx_pos) + sqr(dy_pos) + sqr(dz_pos);
+            f32 d = (dc + dpos*invwt) / (ksize*ksize);
 
-          // Calculate distance metric (same as in process_neighbor)
-          f32 dc = (f32)img[ni] - (f32)img[i];
-          f32 dx_dist = (f32)dx;
-          f32 dy_dist = (f32)dy;
-          f32 dz_dist = (f32)dz;
-          f32 ds = sqr(dx_dist) + sqr(dy_dist) + sqr(dz_dist);
-          f32 dist = sqr(dc) + ds * invwt;
-
-          neighbors[neighbor_count] = (NeighborInfo){
-            .dist = dist,
-            .dz = dz,
-            .dy = dy,
-            .dx = dx,
-            .offset = offset
-          };
-          neighbor_count++;
+            neighbors[neighbor_count] = (NeighborNode){
+              .d = d,
+              .x = (u16)xx,
+              .y = (u16)yy,
+              .z = (u16)zz
+            };
+            neighbor_count++;
+          }
         }
       }
     }
 
-    // Sort neighbors by distance (simple bubble sort since we only need top 6)
-    for (int i = 0; i < 6 && i < neighbor_count; i++) {
-      for (int j = i + 1; j < neighbor_count; j++) {
-        if (neighbors[j].dist < neighbors[i].dist) {
-          NeighborInfo temp = neighbors[i];
-          neighbors[i] = neighbors[j];
-          neighbors[j] = temp;
+    // Simple bubble sort to find N best neighbors
+    // For small N, bubble sort is fine. For larger N, consider quickselect
+    for (int i = 0; i < neighbor_count - 1 && i < MAX_NEIGHBORS; i++) {
+      for (int j = 0; j < neighbor_count - i - 1; j++) {
+        if (neighbors[j].d > neighbors[j + 1].d) {
+          NeighborNode temp = neighbors[j];
+          neighbors[j] = neighbors[j + 1];
+          neighbors[j + 1] = temp;
         }
       }
     }
 
-    // Process only the closest 6 neighbors (or fewer if there aren't 6 valid neighbors)
-    int num_to_process = (neighbor_count < 6) ? neighbor_count : 6;
-    for (int j = 0; j < num_to_process; j++) {
-      NeighborInfo* neigh = &neighbors[j];
-      process_neighbor(neigh->dz, neigh->dy, neigh->dx, neigh->offset,
-                      n, i, img, labels, superpixels, k, invwt,
-                      &pq, &neigh_overflow, lz, ly, lx);
+    // Push only the N best neighbors
+    for (int i = 0; i < neighbor_count && i < MAX_NEIGHBORS; i++) {
+      heap_push(&pq, (HeapNode){
+        .d = neighbors[i].d,
+        .k = k,
+        .x = neighbors[i].x,
+        .y = neighbors[i].y,
+        .z = neighbors[i].z
+      });
     }
   }
 
+  // Normalize superpixel properties
   for (u32 k = 1; k <= numk; k++) {
     f32 ksize = (f32)superpixels[k].n;
     superpixels[k].c /= ksize;
@@ -234,8 +223,6 @@ int snic(const u8* img, u16 lz, u16 ly, u16 lx, u32 d_seed, f32 compactness, u32
     superpixels[k].z /= ksize;
   }
 
-  #undef sqr
-  #undef idx
   heap_free(&pq);
-  return neigh_overflow;
+  return 0;
 }

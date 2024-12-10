@@ -13,7 +13,16 @@ import time
 import snic
 import supervoxeler
 from pathlib import Path
-
+import metrics
+import matplotlib.pyplot as plt
+import sys
+from PyQt5.QtWidgets import QApplication
+import zarr
+import time
+import pipeline
+import supervoxeler
+import snic
+from pathlib import Path
 
 class VolumeViewer(QMainWindow):
     def __init__(self, centroids, values, d_seed):
@@ -58,15 +67,15 @@ class VolumeViewer(QMainWindow):
         self.polydata.GetPointData().AddArray(self.color_scalars)
 
         self.sphere = vtk.vtkSphereSource()
-        self.sphere.SetPhiResolution(1)
-        self.sphere.SetThetaResolution(1)
+        self.sphere.SetPhiResolution(2)
+        self.sphere.SetThetaResolution(2)
         self.sphere.SetRadius(1.0)
 
         self.glyph3D = vtk.vtkGlyph3D()
         self.glyph3D.SetSourceConnection(self.sphere.GetOutputPort())
         self.glyph3D.SetInputData(self.polydata)
         self.glyph3D.SetScaleModeToScaleByScalar()
-        self.glyph3D.SetScaleFactor(.5 * self.d_seed)
+        self.glyph3D.SetScaleFactor(0.5 * self.d_seed)
         self.glyph3D.SetColorModeToColorByScalar()
 
     def setup_visualization(self):
@@ -95,37 +104,35 @@ class VolumeViewer(QMainWindow):
 
         self.actor = vtk.vtkActor()
         self.actor.SetMapper(self.mapper)
-        self.actor.GetProperty().SetSpecular(0.3)
+        self.actor.GetProperty().SetSpecular(0.5)
         self.actor.GetProperty().SetSpecularPower(20)
 
         # Enable shadow casting for the actor
-        #self.actor.GetProperty().ShadowOn()
+        self.actor.GetProperty().SetAmbient(0.7)
+        self.actor.GetProperty().SetDiffuse(0.7)
+
+        # Add bright point light above the mesh
+        point_light = vtk.vtkLight()
+        #point_light.SetLightTypeToPositional()  # Make it a point light
+        point_light.SetPosition(127.5, 127.5, 300)  # Position above the center of the 0-255 volume
+        point_light.SetFocalPoint(127.5, 127.5, 127.5)  # Point at center of volume
+        point_light.SetIntensity(1.5)  # Make it bright
+        point_light.SetColor(1, 1, 1)  # White light
+        point_light.SetConeAngle(90)
+        point_light.SetPositional(True)
+
+        # Add ambient light for base illumination
+        ambient_light = vtk.vtkLight()
+        ambient_light.SetLightTypeToHeadlight()
+        ambient_light.SetIntensity(0.7)  # Reduced ambient intensity to make point light more prominent
+
+        # Add all lights to renderer
+        self.renderer.AddLight(point_light)
+        self.renderer.AddLight(ambient_light)
 
         self.renderer.AddActor(self.actor)
-
-        # Set ambient lighting properties on the actor
-        self.actor.GetProperty().SetAmbient(0.3)  # Add ambient component
-        self.actor.GetProperty().SetDiffuse(0.7)  # Add diffuse component
-
-
-        # Add ambient light
-        ambient_light = vtk.vtkLight()
-        ambient_light.SetLightTypeToHeadlight()  # Follows camera
-        ambient_light.SetIntensity(0.8)
-
-        lights = [ambient_light]
-
-        for light in lights:
-            if light != ambient_light:  # Don't set cone angle for ambient light
-                light.SetConeAngle(90)
-            self.renderer.AddLight(light)
-
         self.renderer.ResetCamera()
         self.vtk_widget.Initialize()
-
-        # Set shadow parameters for better performance
-        #self.renderer.SetShadowMapResolution(512)  # Lower resolution for better performance
-        #self.renderer.SetMaximumNumberOfPeels(4)  # Limit the number of transparency layers
 
 
     def update_mappings(self):
@@ -238,8 +245,43 @@ def process_chunk(chunk_path, output_path=None, chunk_coords=(4096, 4096, 4096),
 
     print("Processing volume...")
     processed = np.ascontiguousarray(chunk)
+    #processed = skimage.filters.gaussian(processed, sigma=1.0)
+
+    processed = pipeline.segment_and_clean(processed,32,192)
+
+    processed = (processed - processed.min()) / (processed.max() - processed.min())
+    processed = skimage.exposure.equalize_adapthist(processed,nbins=256,kernel_size=256)
+
+    # Apply unsharp masking
+    # First create blurred version for unsharp mask
+    #blurred = skimage.filters.gaussian(processed, sigma=1.0)
+    # Create the unsharp mask by subtracting blurred from original
+    #mask = processed - blurred
+    # Add mask back to original with a strength factor
+    #strength = 1.0  # Adjust this to control sharpening intensity
+    #processed = processed + strength * mask
+
+
+    # Scale back to 0-255 uint8
+    processed = (processed - processed.min()) / (processed.max() - processed.min()) * 255
+    processed = processed.astype(np.uint8)
     processed = pipeline.apply_glcae_3d(processed)
-    processed[processed < 64] = 0
+    plt.figure(figsize=(10, 6))
+    plt.hist(processed.flatten(), bins=256, edgecolor='black')
+    plt.title('Histogram of Processed Data after GLCAE')
+    plt.xlabel('Intensity Value')
+    plt.ylabel('Frequency')
+    plt.grid(True, alpha=0.3)
+    plt.show()
+
+    # Also print some basic statistics
+    print(f"Processed data statistics:")
+    print(f"Min: {processed.min():.2f}")
+    print(f"Max: {processed.max():.2f}")
+    print(f"Mean: {processed.mean():.2f}")
+    print(f"Std: {processed.std():.2f}")
+
+    #metrics.analyze_superpixel_movement(processed,16,16.0 * 16.0 * 16.0)
 
     print("Supervoxeling ...")
     start_time = time.time()
@@ -258,12 +300,9 @@ def process_chunk(chunk_path, output_path=None, chunk_coords=(4096, 4096, 4096),
 
     print("Superclustering ...")
     start_time = time.time()
-    labels, superclusters = snic.run_snic(processed)
+    labels, superclusters = snic.run_snic(processed, 8, 8.0)
     print(f"Superclustering completed in {time.time() - start_time:.2f} seconds")
-
-    # Filter superclusters
-    superclusters = [sp for sp in superclusters
-                    if sp.n > 0 and sp.c > 0]
+    print(f"got {len(superclusters)} superclusters")
 
     supercluster_centroids = [(sp.z, sp.y, sp.x) for sp in superclusters]
     supercluster_values = np.array([sp.c for sp in superclusters])
@@ -274,17 +313,11 @@ def process_chunk(chunk_path, output_path=None, chunk_coords=(4096, 4096, 4096),
         print(f"Average intensity: {supercluster_values.mean():.2f}")
         print(f"Intensity std: {supercluster_values.std():.2f}")
 
+    #return [supercluster_centroids],[supercluster_values]
     return [supervoxel_centroids, supercluster_centroids], [supervoxel_values, supercluster_values]
 
 if __name__ == "__main__":
-    import sys
-    from PyQt5.QtWidgets import QApplication
-    import zarr
-    import time
-    import pipeline
-    import supervoxeler
-    import snic
-    from pathlib import Path
+
 
     def visualize_volume(centroids, values, d_seed):
         app = QApplication.instance() or QApplication(sys.argv)
@@ -294,9 +327,10 @@ if __name__ == "__main__":
 
     # Set up paths
     # keep if commented out
-    # SCROLL_PATH = Path("/Users/forrest/dl.ash2txt.org/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/1")
-    #SCROLL_PATH = Path("/Users/forrest/dl.ash2txt.org/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/1")
+    #SCROLL_PATH = Path("/Users/forrest/dl.ash2txt.org/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/0")
+    #SCROLL_PATH = Path("/Users/forrest/dl.ash2txt.org/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/")
     SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/0")
+    #SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll1/PHercParis4.volpkg/volumes_zarr_standardized/54keV_7.91um_Scroll1A.zarr/2")
 
     OUTPUT_DIR = Path("output")
 
@@ -305,13 +339,12 @@ if __name__ == "__main__":
 
     print("Compiling Code...")
     supervoxeler.compile_supervoxeler()
-    snic.compile_snic()
+    snic.compile_snic('./c/snic.c','./libsnic.so')
 
     # Process scroll chunk
-    centroids, values = process_chunk(SCROLL_PATH)
+    centroids, values = process_chunk(SCROLL_PATH,chunk_coords=[4096,4096,4096])
 
     # Visualize results if visualization function is available
-    if 'visualize_volume' in globals():
-        print("Visualizing results...")
-        visualize_volume(centroids[0], values[0], 2)
-        visualize_volume(centroids[1], values[1], 8)
+    print("Visualizing results...")
+    visualize_volume(centroids[0], values[0], 2)
+    #visualize_volume(centroids[1], values[1], 2)

@@ -5,10 +5,6 @@ import subprocess
 import warnings
 from typing import Tuple, List, Optional
 
-# Constants
-SUPERPIXEL_MAX_NEIGHS = 27
-
-
 class Superpixel_ctype(ctypes.Structure):
     """C-compatible structure for superpixel data."""
     _fields_ = [
@@ -17,20 +13,18 @@ class Superpixel_ctype(ctypes.Structure):
         ("z", ctypes.c_float),
         ("c", ctypes.c_float),
         ("n", ctypes.c_uint32),
-        ("neighs", ctypes.c_uint32 * SUPERPIXEL_MAX_NEIGHS)
     ]
 
 
 class Superpixel:
     """Python class representing a superpixel with its properties."""
 
-    def __init__(self, z: float, y: float, x: float, c: float, n: int, neighs: List[int]):
+    def __init__(self, z: float, y: float, x: float, c: float, n: int):
         self.z = z  # z-coordinate of centroid
         self.y = y  # y-coordinate of centroid
         self.x = x  # x-coordinate of centroid
         self.c = c  # average intensity
         self.n = n  # number of pixels
-        self.neighs = [n for n in neighs if n > 0]  # non-zero neighbors
 
     def __repr__(self) -> str:
         return f"Superpixel(pos=({self.z:.1f}, {self.y:.1f}, {self.x:.1f}), intensity={self.c:.1f}, size={self.n})"
@@ -67,7 +61,6 @@ def compile_snic(source_path: Path, lib_path: Path) -> None:
     compile_cmd = [
         "gcc", "-O3", "-march=native", "-ffast-math",
         "-shared", "-fPIC",
-        f"-DSUPERPIXEL_MAX_NEIGHS={SUPERPIXEL_MAX_NEIGHS}",
         str(source_path), "-o", str(lib_path)
     ]
 
@@ -78,7 +71,7 @@ def run_snic(
         volume: np.ndarray,
         d_seed: int,
         compactness: float = 40.0
-) -> Tuple[np.ndarray, List[Superpixel], int]:
+) -> Tuple[np.ndarray, List[Superpixel]]:
     """
     Run SNIC superpixel segmentation on a 3D volume.
 
@@ -97,8 +90,6 @@ def run_snic(
         Integer array of superpixel labels
     superpixels : List[Superpixel]
         List of Superpixel objects containing centroid, intensity, and neighbor information
-    neigh_overflow : int
-        Number of neighbors that couldn't be added due to reaching SUPERPIXEL_MAX_NEIGHS
 
     Raises
     ------
@@ -155,7 +146,7 @@ def run_snic(
     superpixels = (Superpixel_ctype * int(max_superpixels))()
 
     # Run SNIC
-    neigh_overflow = lib.snic(
+    lib.snic(
         volume,
         lz, ly, lx,
         d_seed,
@@ -163,9 +154,6 @@ def run_snic(
         labels,
         superpixels
     )
-
-    if neigh_overflow > 0:
-        warnings.warn(f"Some superpixels exceeded maximum neighbor count ({SUPERPIXEL_MAX_NEIGHS})")
 
     # Convert C superpixels to Python objects
     superpixel_list = []
@@ -175,7 +163,6 @@ def run_snic(
         if sp.n > 0 and sp.c >= 0:  # Valid superpixel
             superpixel_list.append(Superpixel(
                 sp.z, sp.y, sp.x, sp.c, sp.n,
-                [n for n in sp.neighs]
             ))
         else:
             empty_count += 1
@@ -183,7 +170,7 @@ def run_snic(
     if empty_count > 0:
         warnings.warn(f"Found {empty_count} empty superpixels")
 
-    return labels, superpixel_list, neigh_overflow
+    return labels, superpixel_list
 
 
 def estimate_superpixel_count(volume_shape: Tuple[int, int, int], d_seed: int) -> int:
