@@ -12,6 +12,11 @@ import numpy as np
 from scipy.optimize import minimize_scalar
 
 
+import numpy as np
+from numba import jit
+import numpy.typing as npt
+
+
 def mapping3d(h, l):
     """
     Compute mapping function for histogram equalization.
@@ -80,117 +85,6 @@ def apply_glcae_3d(volume, l=256):
 
     return output
 
-
-import numpy as np
-from numba import jit
-import numpy.typing as npt
-
-
-@jit(nopython=True)
-def analyze_1d_sequence(sequence: np.ndarray, noise_threshold: int = 30) -> np.ndarray:
-    """
-    Analyze a 1D sequence to identify void regions based on transitions.
-    Returns a mask where 1 indicates void space and 0 indicates matter.
-    """
-    length = len(sequence)
-    mask = np.zeros(length, dtype=np.uint8)
-
-    # Find transitions
-    i = 0
-    while i < length:
-        # Skip high-value regions
-        while i < length and sequence[i] > noise_threshold:
-            i += 1
-
-        if i >= length:
-            break
-
-        # We've hit a potential void region
-        start_idx = i
-        max_val = sequence[i]
-
-        # Analyze until we hit a high value or end
-        while i < length and sequence[i] <= noise_threshold:
-            max_val = max(max_val, sequence[i])
-            i += 1
-
-        # If we didn't reach a high value in this segment, mark as void
-        if max_val <= noise_threshold:
-            mask[start_idx:i] = 1
-
-    return mask
-
-
-@jit(nopython=True)
-def process_volume(volume: np.ndarray, noise_threshold: int = 30, min_votes: int = 4) -> np.ndarray:
-    """
-    Process a 3D volume to identify void spaces using directional analysis.
-
-    Args:
-        volume: 3D numpy array of uint8 values
-        noise_threshold: Maximum value to consider as potential void
-        min_votes: Minimum number of directions (1-6) that must agree for a voxel to be considered void
-
-    Returns:
-        Binary mask where 1 indicates void space
-    """
-    depth, height, width = volume.shape
-    votes = np.zeros_like(volume, dtype=np.uint8)
-
-    # Process along depth (front-back)
-    for y in range(height):
-        for x in range(width):
-            sequence = volume[:, y, x]
-            mask = analyze_1d_sequence(sequence, noise_threshold)
-            votes[:, y, x] += mask
-
-    # Process along height (up-down)
-    for z in range(depth):
-        for x in range(width):
-            sequence = volume[z, :, x]
-            mask = analyze_1d_sequence(sequence, noise_threshold)
-            votes[z, :, x] += mask
-
-    # Process along width (left-right)
-    for z in range(depth):
-        for y in range(height):
-            sequence = volume[z, y, :]
-            mask = analyze_1d_sequence(sequence, noise_threshold)
-            votes[z, y, :] += mask
-
-    # Create final mask based on vote threshold
-    return (votes >= min_votes).astype(np.uint8)
-
-
-def segment_volume(volume: npt.NDArray[np.uint8], noise_threshold: int = 64, min_votes: int = 3) -> npt.NDArray[
-    np.uint8]:
-    """
-    Main function to segment a 3D volume, identifying and removing void spaces.
-
-    Args:
-        volume: Input 3D volume (uint8 values 0-255)
-        noise_threshold: Maximum value to consider as potential void
-        min_votes: Minimum number of directions (1-6) that must agree for a voxel to be considered void
-
-    Returns:
-        Segmented volume with void spaces set to 0
-    """
-    # Validate input
-    if volume.dtype != np.uint8:
-        raise ValueError("Input volume must be uint8")
-    if not (0 <= noise_threshold <= 255):
-        raise ValueError("noise_threshold must be between 0 and 255")
-    if not (1 <= min_votes <= 6):
-        raise ValueError("min_votes must be between 1 and 6")
-
-    # Get void mask
-    void_mask = process_volume(volume, noise_threshold, min_votes)
-
-    # Apply mask to create output volume
-    result = volume.copy()
-    result[void_mask == 1] = 0
-
-    return result
 
 
 @jit(nopython=True)
@@ -304,84 +198,190 @@ def segment_and_clean(volume: np.ndarray,
     return result
 
 
-@jit(nopython=True)
-def flood_fill_segment_numba(volume: np.ndarray,
-                             iso_threshold: int,
-                             start_threshold: int) -> np.ndarray:
+def get_chunk_slices(shape, chunk_size):
     """
-    Numba-optimized flood fill segmentation.
+    Generate slices for chunking a 3D volume.
+
+    Parameters:
+    -----------
+    shape : tuple
+        Shape of the volume (depth, height, width)
+    chunk_size : int
+        Size of cubic chunks
+
+    Returns:
+    --------
+    list of tuples
+        Each tuple contains (depth_slice, height_slice, width_slice)
     """
-    depth, height, width = volume.shape
-    mask = np.zeros_like(volume, dtype=np.uint8)
-    visited = np.zeros_like(volume, dtype=np.uint8)
+    depth, height, width = shape
+    slices = []
 
-    # Pre-allocate queue arrays (worst case: entire volume)
-    # Using separate arrays for z, y, x coordinates
-    max_queue_size = depth * height * width
-    queue_z = np.zeros(max_queue_size, dtype=np.int32)
-    queue_y = np.zeros(max_queue_size, dtype=np.int32)
-    queue_x = np.zeros(max_queue_size, dtype=np.int32)
-    queue_start = 0  # Front of queue
-    queue_end = 0  # Back of queue
+    for d in range(0, depth, chunk_size):
+        for h in range(0, height, chunk_size):
+            for w in range(0, width, chunk_size):
+                d_slice = slice(d, min(d + chunk_size, depth))
+                h_slice = slice(h, min(h + chunk_size, height))
+                w_slice = slice(w, min(w + chunk_size, width))
+                slices.append((d_slice, h_slice, w_slice))
 
-    # Find and add starting points
-    for z in range(depth):
-        for y in range(height):
-            for x in range(width):
-                if volume[z, y, x] >= start_threshold:
-                    queue_z[queue_end] = z
-                    queue_y[queue_end] = y
-                    queue_x[queue_end] = x
-                    queue_end += 1
-                    mask[z, y, x] = 1
-                    visited[z, y, x] = 1
-
-    # Process queue
-    while queue_start < queue_end:
-        # Get current point
-        current_z = queue_z[queue_start]
-        current_y = queue_y[queue_start]
-        current_x = queue_x[queue_start]
-        queue_start += 1
-
-        # Get neighbors
-        neighbors = get_neighbors_3d(
-            current_z, current_y, current_x,
-            depth, height, width
-        )
-
-        # Process each neighbor
-        for i in range(len(neighbors)):
-            z = neighbors[i, 0]
-            y = neighbors[i, 1]
-            x = neighbors[i, 2]
-
-            # Skip if already visited or below threshold
-            if visited[z, y, x] == 1 or volume[z, y, x] < iso_threshold:
-                continue
-
-            # Mark as part of region and add to queue
-            mask[z, y, x] = 1
-            visited[z, y, x] = 1
-            queue_z[queue_end] = z
-            queue_y[queue_end] = y
-            queue_x[queue_end] = x
-            queue_end += 1
-
-    return mask
+    return slices
 
 
-@jit(nopython=True)
-def apply_mask_numba(volume: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """Apply mask to volume using explicit loops for Numba compatibility."""
-    result = volume.copy()
-    depth, height, width = volume.shape
+def compute_global_params(volume, chunk_size=256, l=256):
+    """
+    Compute global parameters from a volume by processing it in chunks,
+    ignoring zero values.
 
-    for z in range(depth):
-        for y in range(height):
-            for x in range(width):
-                if mask[z, y, x] == 0:
-                    result[z, y, x] = 0
+    Parameters:
+    -----------
+    volume : ndarray
+        Input 3D volume as uint8
+    chunk_size : int
+        Size of cubic chunks
+    l : int
+        Number of intensity levels (default 256 for uint8)
 
-    return result
+    Returns:
+    --------
+    dict containing:
+        - lambda_opt: optimal lambda value
+        - h_u: uniform histogram
+        - total_size: total number of non-zero voxels
+    """
+    if volume.dtype != np.uint8:
+        raise ValueError("Volume must be uint8")
 
+    # Initialize histogram (index 0 will be ignored)
+    h_i = np.zeros(l, dtype=np.float32)
+    total_nonzero = 0
+
+    # Get chunk slices
+    chunk_slices = get_chunk_slices(volume.shape, chunk_size)
+
+    # Process each chunk
+    for d_slice, h_slice, w_slice in chunk_slices:
+        chunk = volume[d_slice, h_slice, w_slice]
+        # Only consider non-zero values
+        nonzero_values = chunk[chunk > 0]
+        if nonzero_values.size > 0:
+            chunk_hist = np.bincount(nonzero_values.flatten(), minlength=l)
+            h_i += chunk_hist
+            total_nonzero += nonzero_values.size
+
+    # Set zero-value bin to 0 and normalize histogram using only non-zero counts
+    h_i[0] = 0
+    h_i = h_i.astype(np.float32) / total_nonzero if total_nonzero > 0 else h_i
+
+    # Create uniform histogram excluding zero
+    h_u = np.ones(l, dtype=np.float32)
+    h_u[0] = 0  # Zero bin is excluded
+    h_u = h_u / (l - 1)  # Normalize excluding zero bin
+
+    # Optimize lambda
+    result = minimize_scalar(f3d, method="brent", args=(h_i, h_u, l))
+
+    return {
+        'lambda_opt': result.x,
+        'h_u': h_u,
+        'total_nonzero': total_nonzero
+    }
+
+
+def process_chunk(chunk, global_params, l=256):
+    """
+    Process a single chunk using pre-computed global parameters,
+    preserving zero values.
+
+    Parameters:
+    -----------
+    chunk : ndarray
+        3D volume chunk as uint8
+    global_params : dict
+        Dictionary containing global parameters from compute_global_params
+    l : int
+        Number of intensity levels (default 256 for uint8)
+
+    Returns:
+    --------
+    output : ndarray
+        Contrast-enhanced chunk as uint8
+    """
+    if chunk.dtype != np.uint8:
+        raise ValueError("Chunk must be uint8")
+
+    # Create mask for non-zero values
+    nonzero_mask = chunk > 0
+
+    # Handle NaN and infinity values
+    chunk = np.nan_to_num(chunk, nan=0, posinf=255, neginf=0).astype(np.uint8)
+
+    # Calculate local histogram only for non-zero values
+    nonzero_values = chunk[nonzero_mask]
+    if nonzero_values.size > 0:
+        h_i_local = np.bincount(nonzero_values.flatten(), minlength=l)
+        h_i_local = h_i_local.astype(np.float32) / nonzero_values.size
+    else:
+        h_i_local = np.zeros(l, dtype=np.float32)
+
+    # Set zero bin to 0
+    h_i_local[0] = 0
+
+    # Use global parameters
+    lam = global_params['lambda_opt']
+    h_u = global_params['h_u']
+
+    # Calculate mapping
+    h_tilde = 1 / (1 + lam) * h_i_local + lam / (1 + lam) * h_u
+    t = mapping3d(h_tilde, l)
+
+    # Force mapping of 0 to remain 0
+    t[0] = 0
+
+    # Create output array
+    output = np.zeros_like(chunk)
+    output[nonzero_mask] = t[chunk[nonzero_mask]]
+
+    return output
+
+
+def apply_chunked_glcae_3d(volume, chunk_size=256, l=256):
+    """
+    Apply GLCAE to a large 3D volume using chunking.
+
+    Parameters:
+    -----------
+    volume : ndarray
+        Input 3D volume as uint8
+    chunk_size : int
+        Size of cubic chunks (default 256)
+    l : int
+        Number of intensity levels (default 256 for uint8)
+
+    Returns:
+    --------
+    output : ndarray
+        Contrast-enhanced volume as uint8
+    """
+    if volume.dtype != np.uint8:
+        raise ValueError("Input volume must be uint8")
+
+    # Initialize output volume
+    output = np.zeros_like(volume)
+
+    # Compute global parameters
+    global_params = compute_global_params(volume, chunk_size, l)
+
+    # Get chunk slices
+    chunk_slices = get_chunk_slices(volume.shape, chunk_size)
+
+    # Process each chunk
+    for d_slice, h_slice, w_slice in chunk_slices:
+        # Extract and process chunk
+        chunk = volume[d_slice, h_slice, w_slice]
+        enhanced_chunk = process_chunk(chunk, global_params, l)
+
+        # Store result
+        output[d_slice, h_slice, w_slice] = enhanced_chunk
+
+    return output

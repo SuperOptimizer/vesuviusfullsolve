@@ -91,7 +91,7 @@ class VolumeViewer(QMainWindow):
         lut = vtk.vtkLookupTable()
         lut.SetNumberOfTableValues(256)
         for i in range(256):
-            color = cm.viridis(i / 255.0)
+            color = cm.cividis(i / 255.0)
             lut.SetTableValue(i, color[0], color[1], color[2], 1.0)
         lut.Build()
 
@@ -229,43 +229,34 @@ def extract_supervoxels_from_grid(grid_result):
 
     return centroids, np.array(values)
 
-def process_chunk(chunk_path, output_path=None, chunk_coords=(4096, 4096, 4096), chunk_size=256):
+def process_chunk(chunk_path, output_path=None, chunk_coords=(2048, 4096, 4096), chunk_size=512, ISO=32, sharpen=1):
     print("Reading chunk...")
     scroll = zarr.open(chunk_path, mode="r")
 
-    # Extract chunk coordinates
     z_start, y_start, x_start = chunk_coords
 
-    # Read and process fixed size chunk
     chunk = scroll[
             z_start:z_start + chunk_size,
             y_start:y_start + chunk_size,
             x_start:x_start + chunk_size
             ]
 
+
     print("Processing volume...")
     processed = np.ascontiguousarray(chunk)
-    #processed = skimage.filters.gaussian(processed, sigma=1.0)
+    mask = processed < ISO
+    processed = skimage.filters.gaussian(processed, sigma=0.25)
+    blurred = skimage.filters.gaussian(processed, sigma=0.5)
+    unsharp_mask = processed - blurred
+    processed = processed + sharpen * unsharp_mask
+    processed = skimage.exposure.equalize_hist(processed,nbins=256)
+    processed = (processed*255).astype(np.uint8)
+    processed[mask] = 0
+    processed = pipeline.apply_chunked_glcae_3d(processed)
+    processed = processed[0:256,0:256,0:256]
+    processed[mask[0:256,0:256,0:256]] = 0
+    processed = pipeline.segment_and_clean(processed,ISO,128)
 
-    processed = pipeline.segment_and_clean(processed,32,192)
-
-    processed = (processed - processed.min()) / (processed.max() - processed.min())
-    processed = skimage.exposure.equalize_adapthist(processed,nbins=256,kernel_size=256)
-
-    # Apply unsharp masking
-    # First create blurred version for unsharp mask
-    #blurred = skimage.filters.gaussian(processed, sigma=1.0)
-    # Create the unsharp mask by subtracting blurred from original
-    #mask = processed - blurred
-    # Add mask back to original with a strength factor
-    #strength = 1.0  # Adjust this to control sharpening intensity
-    #processed = processed + strength * mask
-
-
-    # Scale back to 0-255 uint8
-    processed = (processed - processed.min()) / (processed.max() - processed.min()) * 255
-    processed = processed.astype(np.uint8)
-    processed = pipeline.apply_glcae_3d(processed)
     plt.figure(figsize=(10, 6))
     plt.hist(processed.flatten(), bins=256, edgecolor='black')
     plt.title('Histogram of Processed Data after GLCAE')
@@ -300,7 +291,9 @@ def process_chunk(chunk_path, output_path=None, chunk_coords=(4096, 4096, 4096),
 
     print("Superclustering ...")
     start_time = time.time()
-    labels, superclusters = snic.run_snic(processed, 8, 8.0)
+    labels, superclusters = snic.run_snic(processed, 8, 8*8*8)
+    labels[processed == 0] = 0
+
     print(f"Superclustering completed in {time.time() - start_time:.2f} seconds")
     print(f"got {len(superclusters)} superclusters")
 
@@ -313,6 +306,7 @@ def process_chunk(chunk_path, output_path=None, chunk_coords=(4096, 4096, 4096),
         print(f"Average intensity: {supercluster_values.mean():.2f}")
         print(f"Intensity std: {supercluster_values.std():.2f}")
 
+    #return [supervoxel_centroids],[supervoxel_values]
     #return [supercluster_centroids],[supercluster_values]
     return [supervoxel_centroids, supercluster_centroids], [supervoxel_values, supercluster_values]
 
@@ -329,8 +323,8 @@ if __name__ == "__main__":
     # keep if commented out
     #SCROLL_PATH = Path("/Users/forrest/dl.ash2txt.org/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/0")
     #SCROLL_PATH = Path("/Users/forrest/dl.ash2txt.org/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/")
-    SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/0")
-    #SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll1/PHercParis4.volpkg/volumes_zarr_standardized/54keV_7.91um_Scroll1A.zarr/2")
+    #SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/0")
+    SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll1/PHercParis4.volpkg/volumes_zarr_standardized/54keV_7.91um_Scroll1A.zarr/0")
 
     OUTPUT_DIR = Path("output")
 
@@ -342,9 +336,9 @@ if __name__ == "__main__":
     snic.compile_snic('./c/snic.c','./libsnic.so')
 
     # Process scroll chunk
-    centroids, values = process_chunk(SCROLL_PATH,chunk_coords=[4096,4096,4096])
+    centroids, values = process_chunk(SCROLL_PATH)
 
     # Visualize results if visualization function is available
     print("Visualizing results...")
     visualize_volume(centroids[0], values[0], 2)
-    #visualize_volume(centroids[1], values[1], 2)
+    visualize_volume(centroids[1], values[1], 8)

@@ -164,7 +164,7 @@ def analyze_superpixel_movement(volume: np.ndarray, d_seed: int = 8, compactness
         SNIC compactness parameter
     """
     # Run SNIC
-    labels, superpixels, _ = snic.run_snic(volume, d_seed, compactness)
+    labels, superpixels = snic.run_snic(volume, d_seed, compactness)
 
     # Analyze drift
     drift_metrics = analyze_superpixel_drift(volume, labels, superpixels, d_seed)

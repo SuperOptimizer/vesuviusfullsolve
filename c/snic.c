@@ -105,44 +105,73 @@ static HeapNode heap_pop(Heap *heap) {
 #undef heap_fix_edge
 
 
-
 int snic(const u8* img, u16 lz, u16 ly, u16 lx, u32 d_seed, f32 compactness, u32* labels, Superpixel* superpixels) {
   int lylx = ly * lx;
   int img_size = lz * ly * lx;
   Heap pq = heap_alloc(img_size);
   u32 numk = 0;
 
-for (int z = 0; z < lz; z++) {
-  for (int y = 0; y < ly; y++) {
-    for (int x = 0; x < lx; x++) {
-      labels[idx(z,y,x)] = 0;
+  // Initialize all labels to 0 (null superpixel)
+  for (int z = 0; z < lz; z++) {
+    for (int y = 0; y < ly; y++) {
+      for (int x = 0; x < lx; x++) {
+        labels[idx(z,y,x)] = 0;
+      }
     }
   }
-}
 
-  // Initial seeds remain the same
+  // Create seeds at regular intervals regardless of value
   for (u16 iz = 0; iz < lz; iz += d_seed) {
     for (u16 iy = 0; iy < ly; iy += d_seed) {
       for (u16 ix = 0; ix < lx; ix += d_seed) {
         numk++;
-        heap_push(&pq, (HeapNode){.d = 0.0f, .k = numk, .x = ix, .y = iy, .z = iz});
+        if (img[idx(iz,iy,ix)] > 0) {
+          // If seed location is non-zero, use it directly
+          heap_push(&pq, (HeapNode){.d = 0.0f, .k = numk, .x = ix, .y = iy, .z = iz});
+        } else {
+          // If seed location is zero, look for nearest non-zero voxel in neighborhood
+          int found = 0;
+          for (int r = 1; r <= d_seed/2 && !found; r++) {  // Search up to half the seed spacing
+            for (int dz = -r; dz <= r && !found; dz++) {
+              for (int dy = -r; dy <= r && !found; dy++) {
+                for (int dx = -r; dx <= r && !found; dx++) {
+                  if (dx*dx + dy*dy + dz*dz > r*r) continue;  // Skip corners of cube
+
+                  int xx = ix + dx;
+                  int yy = iy + dy;
+                  int zz = iz + dz;
+
+                  if (xx < 0 || xx >= lx || yy < 0 || yy >= ly || zz < 0 || zz >= lz)
+                    continue;
+
+                  if (img[idx(zz,yy,xx)] > 0) {
+                    heap_push(&pq, (HeapNode){.d = 0.0f, .k = numk, .x = xx, .y = yy, .z = zz});
+                    found = 1;
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }
+
   if (numk == 0) {
     return 0;
   }
 
   f32 invwt = compactness * compactness * (f32)numk / (f32)img_size;
-
-  // Temporary array to store and sort neighbors
-  NeighborNode neighbors[26];  // Still need space for all neighbors to find best N
+  NeighborNode neighbors[26];
 
   while (pq.len > 0) {
     HeapNode n = heap_pop(&pq);
     int i = idx(n.z, n.y, n.x);
 
     if (labels[i] > 0) continue;
+
+    // Only grow into non-zero voxels
+    if (img[i] == 0) continue;
 
     u32 k = n.k;
     labels[i] = k;
@@ -152,7 +181,7 @@ for (int z = 0; z < lz; z++) {
     superpixels[k].z += (f32)n.z;
     superpixels[k].n += 1;
 
-    // Find all valid neighbors first
+    // Find all valid neighbors
     int neighbor_count = 0;
     for (int dz = -1; dz <= 1; dz++) {
       for (int dy = -1; dy <= 1; dy++) {
@@ -169,7 +198,8 @@ for (int z = 0; z < lz; z++) {
           int offset = dz * lylx + dx * lx + dy;
           int ni = i + offset;
 
-          if (labels[ni] <= 0) {
+          // Only consider unlabeled, non-zero voxels as valid neighbors
+          if (labels[ni] <= 0 && img[ni] > 0) {
             f32 ksize = (f32)superpixels[k].n;
             f32 dc = sqr(255.0f*(superpixels[k].c - (img[ni]*ksize)));
             f32 dx_pos = superpixels[k].x - xx*ksize;
@@ -190,8 +220,7 @@ for (int z = 0; z < lz; z++) {
       }
     }
 
-    // Simple bubble sort to find N best neighbors
-    // For small N, bubble sort is fine. For larger N, consider quickselect
+    // Sort and push neighbors
     for (int i = 0; i < neighbor_count - 1 && i < MAX_NEIGHBORS; i++) {
       for (int j = 0; j < neighbor_count - i - 1; j++) {
         if (neighbors[j].d > neighbors[j + 1].d) {
@@ -202,7 +231,6 @@ for (int z = 0; z < lz; z++) {
       }
     }
 
-    // Push only the N best neighbors
     for (int i = 0; i < neighbor_count && i < MAX_NEIGHBORS; i++) {
       heap_push(&pq, (HeapNode){
         .d = neighbors[i].d,
@@ -217,10 +245,12 @@ for (int z = 0; z < lz; z++) {
   // Normalize superpixel properties
   for (u32 k = 1; k <= numk; k++) {
     f32 ksize = (f32)superpixels[k].n;
-    superpixels[k].c /= ksize;
-    superpixels[k].x /= ksize;
-    superpixels[k].y /= ksize;
-    superpixels[k].z /= ksize;
+    if (ksize > 0) {  // Only normalize if superpixel has any voxels
+      superpixels[k].c /= ksize;
+      superpixels[k].x /= ksize;
+      superpixels[k].y /= ksize;
+      superpixels[k].z /= ksize;
+    }
   }
 
   heap_free(&pq);
