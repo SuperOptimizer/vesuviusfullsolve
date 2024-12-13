@@ -385,3 +385,4 @@ def apply_chunked_glcae_3d(volume, chunk_size=256, l=256):
         output[d_slice, h_slice, w_slice] = enhanced_chunk
 
     return output
+

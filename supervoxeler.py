@@ -147,3 +147,20 @@ def volume_to_grid(vol_x, vol_y, vol_z):
 def supervoxel_count():
     """Calculate the total number of supervoxels in the grid."""
     return GRID_DIM * GRID_DIM * GRID_DIM
+
+
+def extract_supervoxels_from_grid(grid_result):
+    """Extract valid supervoxels from the grid structure."""
+    centroids = []
+    values = []
+
+    # Process supervoxels
+    for z in range(GRID_DIM):
+        for y in range(GRID_DIM):
+            for x in range(GRID_DIM):
+                sv = grid_result[z, y, x]
+                if sv['n'] > 0 and sv['c'] > 0:
+                    centroids.append((sv['z'], sv['y'], sv['x']))
+                    values.append(sv['c'])
+
+    return centroids, np.array(values)

@@ -5,7 +5,7 @@
 #define MAX_NEIGHBORS 4
 
 typedef struct Superpixel {
-  f32 x, y, z, c;
+  f32 z, y, x, c;
   u32 n;
 } Superpixel;
 

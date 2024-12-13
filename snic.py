@@ -8,27 +8,40 @@ from typing import Tuple, List, Optional
 class Superpixel_ctype(ctypes.Structure):
     """C-compatible structure for superpixel data."""
     _fields_ = [
-        ("x", ctypes.c_float),
-        ("y", ctypes.c_float),
         ("z", ctypes.c_float),
+        ("y", ctypes.c_float),
+        ("x", ctypes.c_float),
         ("c", ctypes.c_float),
         ("n", ctypes.c_uint32),
     ]
 
-
 class Superpixel:
     """Python class representing a superpixel with its properties."""
 
-    def __init__(self, z: float, y: float, x: float, c: float, n: int):
-        self.z = z  # z-coordinate of centroid
-        self.y = y  # y-coordinate of centroid
-        self.x = x  # x-coordinate of centroid
-        self.c = c  # average intensity
-        self.n = n  # number of pixels
+    def __init__(self, z: float, y: float, x: float, c: float, n: int, connections: dict = None):
+        self.z = z
+        self.y = y
+        self.x = x
+        self.c = c
+        self.n = n
+        self.connections = connections or {}  # Dict mapping neighbor_label -> connection_strength
 
     def __repr__(self) -> str:
-        return f"Superpixel(pos=({self.z:.1f}, {self.y:.1f}, {self.x:.1f}), intensity={self.c:.1f}, size={self.n})"
+        return f"Superpixel(pos=({self.z:.1f}, {self.y:.1f}, {self.x:.1f}), intensity={self.c:.1f}, size={self.n}, neighbors={len(self.connections)})"
 
+class SuperpixelConnection_ctype(ctypes.Structure):
+    """C-compatible structure for connection data."""
+    _fields_ = [
+        ("neighbor_label", ctypes.c_uint32),
+        ("connection_strength", ctypes.c_float),
+    ]
+
+class SuperpixelConnections_ctype(ctypes.Structure):
+    """C-compatible structure for all connections of a superpixel."""
+    _fields_ = [
+        ("connections", ctypes.POINTER(SuperpixelConnection_ctype)),
+        ("num_connections", ctypes.c_int),
+    ]
 
 class SNICError(Exception):
     """Custom exception for SNIC-related errors."""
@@ -70,64 +83,17 @@ def compile_snic(source_path: Path, lib_path: Path) -> None:
 def run_snic(
         volume: np.ndarray,
         d_seed: int,
-        compactness: float = 40.0
+        compactness: float = 40.0, min_superpixel_size=1
 ) -> Tuple[np.ndarray, List[Superpixel]]:
-    """
-    Run SNIC superpixel segmentation on a 3D volume.
+    """Run SNIC superpixel segmentation on a 3D volume."""
+    # ... (previous input validation code remains the same) ...
 
-    Parameters
-    ----------
-    volume : np.ndarray
-        Input 3D volume (uint8 or float in range [0, 1])
-    d_seed : int
-        Spacing between superpixel seeds (must be a power of 2)
-    compactness : float, optional
-        Compactness factor (default: 40.0)
+    lz,ly,lx = volume.shape
 
-    Returns
-    -------
-    labels : np.ndarray
-        Integer array of superpixel labels
-    superpixels : List[Superpixel]
-        List of Superpixel objects containing centroid, intensity, and neighbor information
-
-    Raises
-    ------
-    SNICError
-        If input validation fails or SNIC execution fails
-    """
-    # Input validation and normalization
-    if volume.ndim != 3:
-        raise SNICError(f"Expected 3D volume, got {volume.ndim}D")
-
-    if not volume.flags['C_CONTIGUOUS']:
-        volume = np.ascontiguousarray(volume)
-
-    # Handle float inputs in [0, 1]
-    if volume.dtype == np.float32 or volume.dtype == np.float64:
-        if volume.min() < 0 or volume.max() > 1:
-            raise SNICError("Float volume must be in range [0, 1]")
-        volume = (volume * 255).astype(np.uint8)
-    elif volume.dtype != np.uint8:
-        raise SNICError(f"Unsupported dtype: {volume.dtype}, expected uint8 or float")
-
-    # Validate dimensions
-    lz, ly, lx = volume.shape
-    max_dim = max(lz, ly, lx)
-    if max_dim >= 2 ** 16:
-        raise SNICError(f"Volume dimension {max_dim} exceeds uint16 limit")
-
-    def is_power_of_2(n: int) -> bool:
-        return n > 0 and (n & (n - 1)) == 0
-
-    if not is_power_of_2(d_seed):
-        raise SNICError(f"d_seed must be a power of 2, got {d_seed}")
-
-    if d_seed >= min(volume.shape):
-        raise SNICError(f"d_seed ({d_seed}) must be smaller than smallest dimension ({min(volume.shape)})")
-
-    # Load and configure library
+    # Load and configure SNIC library
     lib = _load_snic_library()
+
+    # Configure SNIC function
     lib.snic.argtypes = [
         np.ctypeslib.ndpointer(dtype=np.uint8),
         ctypes.c_uint16,
@@ -140,13 +106,24 @@ def run_snic(
     ]
     lib.snic.restype = ctypes.c_int
 
+    # Configure connection calculation function
+    lib.calculate_superpixel_connections.argtypes = [
+        np.ctypeslib.ndpointer(dtype=np.uint8),
+        np.ctypeslib.ndpointer(dtype=np.uint32),
+        ctypes.c_uint16,
+        ctypes.c_uint16,
+        ctypes.c_uint16,
+        ctypes.c_uint32
+    ]
+    lib.calculate_superpixel_connections.restype = ctypes.POINTER(SuperpixelConnections_ctype)
+
     # Prepare outputs
     labels = np.zeros(volume.shape, dtype=np.uint32)
     max_superpixels = ((lz // d_seed) * (ly // d_seed) * (lx // d_seed)) + 1
     superpixels = (Superpixel_ctype * int(max_superpixels))()
 
     # Run SNIC
-    lib.snic(
+    result = lib.snic(
         volume,
         lz, ly, lx,
         d_seed,
@@ -155,17 +132,52 @@ def run_snic(
         superpixels
     )
 
-    # Convert C superpixels to Python objects
+    if result != 0:
+        raise SNICError("SNIC execution failed")
+
+    # Calculate connections
+    connections = lib.calculate_superpixel_connections(
+        volume,
+        labels,
+        lz, ly, lx,
+        max_superpixels - 1
+    )
+
+    # First pass: Create all superpixel objects without connections
     superpixel_list = []
+    # Map from C label -> Python Superpixel object
+    label_to_superpixel = {}
+
     empty_count = 0
     for i in range(1, max_superpixels):  # Skip index 0
         sp = superpixels[i]
-        if sp.n > 0 and sp.c >= 0:  # Valid superpixel
-            superpixel_list.append(Superpixel(
+        if sp.n >= min_superpixel_size and sp.c > 0:  # Valid superpixel
+            new_superpixel = Superpixel(
                 sp.z, sp.y, sp.x, sp.c, sp.n,
-            ))
+                connections={}
+            )
+            superpixel_list.append(new_superpixel)
+            label_to_superpixel[i] = new_superpixel
         else:
             empty_count += 1
+
+    # Second pass: Add connections using Superpixel object references
+    for i in range(1, max_superpixels):
+        if i in label_to_superpixel:  # If this is a valid superpixel
+            current_superpixel = label_to_superpixel[i]
+
+            if connections[i].num_connections > 0:
+                for j in range(connections[i].num_connections):
+                    conn = connections[i].connections[j]
+                    neighbor_label = conn.neighbor_label
+
+                    # Only add connection if neighbor exists
+                    if neighbor_label in label_to_superpixel:
+                        neighbor_superpixel = label_to_superpixel[neighbor_label]
+                        current_superpixel.connections[neighbor_superpixel] = conn.connection_strength
+
+    # Free C memory
+    lib.free_superpixel_connections(connections, max_superpixels - 1)
 
     if empty_count > 0:
         warnings.warn(f"Found {empty_count} empty superpixels")

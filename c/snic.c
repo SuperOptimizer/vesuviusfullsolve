@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <time.h>
+#include <stdbool.h>
 
 #include "common.h"
 #include "snic.h"
@@ -255,4 +256,144 @@ int snic(const u8* img, u16 lz, u16 ly, u16 lx, u32 d_seed, f32 compactness, u32
 
   heap_free(&pq);
   return 0;
+}
+
+typedef struct SuperpixelConnection {
+    u32 neighbor_label;  // The label of the neighboring superpixel
+    f32 connection_strength;  // Sum of values at the boundary
+} SuperpixelConnection;
+
+typedef struct SuperpixelConnections {
+    SuperpixelConnection* connections;  // Array of connections for this superpixel
+    int num_connections;  // Number of connections found
+} SuperpixelConnections;
+
+// Calculate connections between superpixels
+SuperpixelConnections* calculate_superpixel_connections(
+    const u8* img,           // Original image data
+    const u32* labels,       // Labels array from SNIC
+    u16 lz, u16 ly, u16 lx,  // Dimensions
+    u32 num_superpixels     // Number of superpixels
+) {
+    int lylx = ly * lx;
+
+    // Allocate array of SuperpixelConnections for each superpixel
+    SuperpixelConnections* all_connections = (SuperpixelConnections*)calloc(
+        num_superpixels + 1, sizeof(SuperpixelConnections));
+
+    // First pass: count number of connections for each superpixel
+    for (int z = 0; z < lz; z++) {
+        for (int y = 0; y < ly; y++) {
+            for (int x = 0; x < lx; x++) {
+                u32 current_label = labels[idx(z,y,x)];
+                if (current_label == 0) continue;  // Skip unlabeled voxels
+
+                // Check all 26 neighbors
+                for (int dz = -1; dz <= 1; dz++) {
+                    for (int dy = -1; dy <= 1; dy++) {
+                        for (int dx = -1; dx <= 1; dx++) {
+                            if (dz == 0 && dy == 0 && dx == 0) continue;
+
+                            int xx = x + dx;
+                            int yy = y + dy;
+                            int zz = z + dz;
+
+                            // Skip if out of bounds
+                            if (xx < 0 || xx >= lx || yy < 0 || yy >= ly || zz < 0 || zz >= lz)
+                                continue;
+
+                            u32 neighbor_label = labels[idx(zz,yy,xx)];
+                            if (neighbor_label == 0 || neighbor_label == current_label)
+                                continue;
+
+                            // Count unique neighbor labels
+                            bool found = false;
+                            for (int i = 0; i < all_connections[current_label].num_connections; i++) {
+                                if (all_connections[current_label].connections &&
+                                    all_connections[current_label].connections[i].neighbor_label == neighbor_label) {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (!found) {
+                                all_connections[current_label].num_connections++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Allocate arrays for connections
+    for (u32 i = 1; i <= num_superpixels; i++) {
+        if (all_connections[i].num_connections > 0) {
+            all_connections[i].connections = (SuperpixelConnection*)calloc(
+                all_connections[i].num_connections, sizeof(SuperpixelConnection));
+            all_connections[i].num_connections = 0;  // Reset for second pass
+        }
+    }
+
+    // Second pass: calculate connection strengths
+    for (int z = 0; z < lz; z++) {
+        for (int y = 0; y < ly; y++) {
+            for (int x = 0; x < lx; x++) {
+                u32 current_label = labels[idx(z,y,x)];
+                if (current_label == 0) continue;
+
+                // Check all 26 neighbors
+                for (int dz = -1; dz <= 1; dz++) {
+                    for (int dy = -1; dy <= 1; dy++) {
+                        for (int dx = -1; dx <= 1; dx++) {
+                            if (dz == 0 && dy == 0 && dx == 0) continue;
+
+                            int xx = x + dx;
+                            int yy = y + dy;
+                            int zz = z + dz;
+
+                            if (xx < 0 || xx >= lx || yy < 0 || yy >= ly || zz < 0 || zz >= lz)
+                                continue;
+
+                            u32 neighbor_label = labels[idx(zz,yy,xx)];
+                            if (neighbor_label == 0 || neighbor_label == current_label)
+                                continue;
+
+                            // Find or create connection entry
+                            int connection_idx = -1;
+                            for (int i = 0; i < all_connections[current_label].num_connections; i++) {
+                                if (all_connections[current_label].connections[i].neighbor_label == neighbor_label) {
+                                    connection_idx = i;
+                                    break;
+                                }
+                            }
+
+                            if (connection_idx == -1) {
+                                connection_idx = all_connections[current_label].num_connections++;
+                                all_connections[current_label].connections[connection_idx].neighbor_label = neighbor_label;
+                                all_connections[current_label].connections[connection_idx].connection_strength = 0;
+                            }
+
+                            // Add current voxel value to connection strength
+                            all_connections[current_label].connections[connection_idx].connection_strength +=
+                                (f32)img[idx(z,y,x)];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return all_connections;
+}
+
+// Don't forget to free the allocated memory when done
+void free_superpixel_connections(SuperpixelConnections* connections, u32 num_superpixels) {
+    if (!connections) return;
+
+    for (u32 i = 1; i <= num_superpixels; i++) {
+        if (connections[i].connections) {
+            free(connections[i].connections);
+        }
+    }
+    free(connections);
 }
