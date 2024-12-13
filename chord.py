@@ -120,86 +120,87 @@ def select_start_points(points: List,
     print(f"Selected {len(starts)} start points")
     return starts
 
-
 def grow_chord(start_point: int,
-               points: List,
-               positions: np.ndarray,
-               intensities: np.ndarray,
-               id_to_index: Dict[int, int],
-               available: np.ndarray,
-               min_length: int = 8,
-               max_length: int = 32) -> Optional[Set]:
-    """Grow a single chord bidirectionally."""
+              points: List,
+              positions: np.ndarray,
+              intensities: np.ndarray,
+              id_to_index: Dict[int, int],
+              available: np.ndarray,
+              min_length: int = 8,
+              max_length: int = 32) -> Optional[Set]:
+   """Grow a single chord bidirectionally following strong connections."""
+   current = points[start_point]
+   chord = {current}
+   pos = positions[start_point]
+   recent_dirs = []
 
-    # Initialize chord state
-    current = points[start_point]
-    chord = {current}
-    pos = positions[start_point]
+   for direction in [1, -1]:  # Forward and backward along z
+       current_pos = pos.copy()
+       current_point = current
+       recent_dirs = []  # Reset for each direction
 
-    # Try growing in both directions
-    for direction in [1, -1]:  # Forward and backward along z
-        current_pos = pos.copy()
-        current_point = current
-        steps = 0
+       while len(chord) < max_length:
+           if not hasattr(current_point, 'connections') or not current_point.connections:
+               break
 
-        while len(chord) < max_length:
-            # Get connected points
-            if not hasattr(current_point, 'connections') or not current_point.connections:
-                break
+           candidates = []
+           for next_point, strength in current_point.connections.items():
+               idx = id_to_index[id(next_point)]
+               if not available[idx]:
+                   continue
 
-            # Score and sort connected points
-            candidates = []
-            for next_point, strength in current_point.connections.items():
-                idx = id_to_index[id(next_point)]
-                if not available[idx]:
-                    continue
+               next_pos = positions[idx]
+               dp = next_pos - current_pos
 
-                next_pos = positions[idx]
-                dp = next_pos - current_pos
+               # Basic distance check
+               dist = np.linalg.norm(dp)
+               if dist < 0.1:
+                   continue
 
-                # Calculate scores
-                dist = np.linalg.norm(dp)
-                if dist < 0.1:
-                    continue
+               # Enforce z-direction constraint
+               if (direction > 0 and next_pos[0] <= current_pos[0]) or \
+                  (direction < 0 and next_pos[0] >= current_pos[0]):
+                   continue
 
-                # Direction score favors z-axis movement
-                dp_norm = dp / dist
-                z_score = dp_norm[0] * direction
+               dp_norm = dp / dist
+               z_score = dp_norm[0] * direction
+               if z_score < 0.1:  # Minimum z-alignment
+                   continue
 
-                if z_score < 0.2:  # Minimum z-direction requirement
-                    continue
+               # Connection strength is primary score
+               conn_score = strength / 255.0
 
-                # Connection strength score
-                conn_score = strength / 255.0
+               # Path smoothness
+               smoothness_score = 1.0
+               if recent_dirs:
+                   avg_dir = np.mean(recent_dirs, axis=0)
+                   smoothness_score = np.dot(dp_norm, avg_dir)
+                   smoothness_score = (smoothness_score + 1) / 2
 
-                # Intensity continuity score
-                int_score = 1.0 / (1.0 + abs(intensities[idx] - intensities[start_point]))
+               total_score = (
+                   conn_score * 0.6 +         # Primary: follow strong connections
+                   z_score * 0.2 +            # Secondary: maintain z direction
+                   smoothness_score * 0.2     # Tertiary: avoid sharp turns
+               )
 
-                # Combined score with emphasis on z-direction and connections
-                total_score = (z_score * 0.4 +
-                               conn_score * 0.4 +
-                               int_score * 0.2)
+               candidates.append((idx, next_pos, total_score, dp_norm))
 
-                candidates.append((idx, next_pos, total_score))
+           if not candidates:
+               break
 
-            if not candidates:
-                break
+           idx, pos, _, direction_vec = max(candidates, key=lambda x: x[2])
+           point = points[idx]
 
-            # Select best candidate
-            idx, pos, _ = max(candidates, key=lambda x: x[2])
-            point = points[idx]
+           chord.add(point)
+           available[idx] = False
+           current_pos = pos
+           current_point = point
 
-            # Add to chord
-            chord.add(point)
-            available[idx] = False
-            current_pos = pos
-            current_point = point
-            steps += 1
+           recent_dirs.append(direction_vec)
+           if len(recent_dirs) > 3:
+               recent_dirs.pop(0)
 
-    # Return chord if it meets minimum length
-    if len(chord) >= min_length:
-        return chord
-    return None
+   return chord if len(chord) >= min_length else None
 
 
 def grow_fiber_chords(points: List,

@@ -80,7 +80,7 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_compon
     chords = chord.grow_fiber_chords(
     points=superclusters,
     bounds=bounding_box,
-    num_chords=4096,
+    num_chords=512,
     min_length=16,
     max_length=128,)
 
@@ -126,7 +126,7 @@ def main():
     snic.compile_snic('./c/snic.c','./libsnic.so')
 
 
-    chunk_coords=(4096, 2048, 2048)
+    chunk_coords=(4096, 3072, 3072)
     chunk_dims=(256,256,256)
     ISO=32
     sharpen=1
