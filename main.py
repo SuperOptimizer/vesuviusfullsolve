@@ -49,6 +49,7 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_compon
 
     z_start, y_start, x_start = chunk_coords
 
+
     chunk = scroll[
             z_start:z_start + chunk_dims[0],
             y_start:y_start + chunk_dims[1],
@@ -63,14 +64,29 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_compon
     labels[processed == 0] = 0
     print(f"Superclustering completed in {time.time() - start_time:.2f} seconds")
     print(f"got {len(superclusters)} superclusters")
+    print("\nDEBUG SNIC output:")
+    print("First few superclusters:")
+    for sc in superclusters[:5]:
+        print(f"pos=({sc.z}, {sc.y}, {sc.x}), c={sc.c}")
 
-    chords, used_ids = chord.create_spatially_distributed_chords(
-        superclusters,
-        max_chords=512,
-        min_size=16,
-        max_size=128,
-        min_spacing=2.0  # Adjust based on your data scale
-    )
+
+
+    bounding_box = np.array([
+        [0, chunk_dims[0]],
+        [0, chunk_dims[1]],
+        [0, chunk_dims[2]],
+    ])
+
+    chords = chord.grow_fiber_chords(
+    points=superclusters,
+    bounds=bounding_box,
+    num_chords=4096,
+    min_length=16,
+    max_length=64,
+    z_bias=0.5,
+    min_direction_score=0.3,
+    search_radius=8.0
+)
 
     # Process results (similar to original code)
     all_centroids = []
@@ -82,7 +98,7 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_compon
     for chord_idx, chord_ in enumerate(chords):
         chord_centroids = [(sp.z, sp.y, sp.x) for sp in chord_]
         chord_values = [sp.c for sp in chord_]
-        chord_indices = [chord_idx % 512] * len(chord_)
+        chord_indices = [chord_idx % 1024] * len(chord_)
 
         all_centroids.extend(chord_centroids)
         all_values.extend(chord_values)
@@ -99,10 +115,10 @@ def main():
 
     # Set up paths
     # keep if commented out
-    SCROLL_PATH = Path("/Users/forrest/dl.ash2txt.org/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/1")
+    #SCROLL_PATH = Path("/Users/forrest/dl.ash2txt.org/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/1")
     #SCROLL_PATH = Path("/Users/forrest/dl.ash2txt.org/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/")
     #SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/1")
-    #SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll1/PHercParis4.volpkg/volumes_zarr_standardized/54keV_7.91um_Scroll1A.zarr/0")
+    SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll1/PHercParis4.volpkg/volumes_zarr_standardized/54keV_7.91um_Scroll1A.zarr/0")
 
     OUTPUT_DIR = Path("output")
 
@@ -115,7 +131,7 @@ def main():
 
 
     chunk_coords=(4096, 2048, 2048)
-    chunk_dims=(128,128,128)
+    chunk_dims=(256,256,256)
     ISO=32
     sharpen=1
     min_component_size=32
@@ -138,9 +154,19 @@ def main():
                 if idx < 256:
                     colormap = cm.viridis
                     color = np.array(colormap(idx / 255.0)[:3]) * 255
-                else:
+                elif idx < 512:
                     colormap = cm.magma
                     color = np.array(colormap((idx-256) / 255.0)[:3]) * 255
+                elif idx < 768:
+                    colormap = cm.inferno
+                    color = np.array(colormap((idx-512) / 255.0)[:3]) * 255
+                elif idx < 1024:
+                    colormap = cm.cividis
+                    color = np.array(colormap((idx-768) / 255.0)[:3]) * 255
+                else:
+                    colormap = cm.plasma
+                    color = np.array(colormap((idx - 1024) / 255.0)[:3]) * 255
+
 
                 color_u8 = color.astype(np.uint8)
                 mask = np.array(all_chord_indices) == idx
