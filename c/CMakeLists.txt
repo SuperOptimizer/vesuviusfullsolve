@@ -19,6 +19,7 @@ endif()
 add_executable(snic_test
         snic.c
         snic_test.c
+        chord.c
 )
 
 target_link_libraries(snic_test m)

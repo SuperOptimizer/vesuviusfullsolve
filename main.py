@@ -82,11 +82,7 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_compon
     bounds=bounding_box,
     num_chords=4096,
     min_length=16,
-    max_length=64,
-    z_bias=0.5,
-    min_direction_score=0.3,
-    search_radius=8.0
-)
+    max_length=128,)
 
     # Process results (similar to original code)
     all_centroids = []
@@ -106,7 +102,7 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_compon
 
     numused = len(all_centroids)
     all_centroids.extend([(sp.z, sp.y, sp.x) for sp in superclusters])
-    all_values.extend(sp.c*.8 for sp in superclusters)
+    all_values.extend(sp.c*.5 for sp in superclusters)
     all_chord_indices.extend([-1]*(len(all_values)-len(all_chord_indices)))
 
     return all_centroids, all_values, all_chord_indices
@@ -134,7 +130,7 @@ def main():
     chunk_dims=(256,256,256)
     ISO=32
     sharpen=1
-    min_component_size=32
+    min_component_size=128
     centroids, values, all_chord_indices = process_chunk(SCROLL_PATH, chunk_coords, chunk_dims, ISO, sharpen, min_component_size)
 
 
