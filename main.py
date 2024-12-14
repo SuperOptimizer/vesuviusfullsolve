@@ -80,7 +80,7 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_compon
     chords = chord.grow_fiber_chords(
     points=superclusters,
     bounds=bounding_box,
-    num_chords=8192*4,
+    num_chords=8192,
     min_length=8,
     max_length=128,)
     print(f"got {len(chords)} chords")

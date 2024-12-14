@@ -95,6 +95,72 @@ def select_start_points(points: List,
    return starts
 
 
+def get_chord_direction(positions: np.ndarray, idx: int, window: int = 3) -> np.ndarray:
+    start = max(0, idx - window)
+    end = min(len(positions), idx + window + 1)
+    if end - start < 2:
+        return np.array([1, 0, 0])  # Default to z-direction
+
+    # Fit line to local points
+    points = positions[start:end]
+    direction = points[-1] - points[0]
+    return direction / np.linalg.norm(direction)
+
+
+def find_chord_joins(chords: List[Set],
+                     positions: np.ndarray,
+                     id_to_index: Dict[int, int],
+                     max_distance: float = 2.0,
+                     min_parallel_score: float = 0.8) -> List[Tuple[Set, Set, int, int]]:
+    joins = []
+    all_positions = []
+    point_to_chord = {}
+
+    # Build spatial index
+    for chord_idx, chord in enumerate(chords):
+        for point in chord:
+            idx = id_to_index[id(point)]
+            pos = positions[idx]
+            all_positions.append(pos)
+            point_to_chord[tuple(pos)] = (chord_idx, point)
+
+    tree = cKDTree(all_positions)
+
+    # Query pairs of points within max_distance
+    pairs = tree.query_pairs(max_distance)
+
+    for pos1_idx, pos2_idx in pairs:
+        pos1 = all_positions[pos1_idx]
+        pos2 = all_positions[pos2_idx]
+
+        chord1_idx, point1 = point_to_chord[tuple(pos1)]
+        chord2_idx, point2 = point_to_chord[tuple(pos2)]
+
+        if chord1_idx >= chord2_idx:
+            continue
+
+        chord1 = chords[chord1_idx]
+        chord2 = chords[chord2_idx]
+
+        # Check direction alignment
+        dir1 = get_chord_direction(
+            np.array([positions[id_to_index[id(p)]] for p in chord1]),
+            list(chord1).index(point1)
+        )
+        dir2 = get_chord_direction(
+            np.array([positions[id_to_index[id(p)]] for p in chord2]),
+            list(chord2).index(point2)
+        )
+
+        if abs(np.dot(dir1, dir2)) > min_parallel_score:
+            joins.append((
+                chord1, chord2,
+                list(chord1).index(point1),
+                list(chord2).index(point2)
+            ))
+
+    return joins
+
 def grow_chord(start_point: int,
                points: List,
                positions: np.ndarray,
@@ -177,6 +243,33 @@ def grow_chord(start_point: int,
     return chord if len(chord) >= min_length else None
 
 
+def would_create_cycle(chord1: Set, chord2: Set, idx1: int, idx2: int) -> bool:
+    # Get ordered lists of points
+    points1 = list(chord1)
+    points2 = list(chord2)
+
+    # Check if any point is shared between chords
+    return bool(chord1.intersection(chord2))
+
+
+def merge_chords(chord1: Set, chord2: Set, idx1: int, idx2: int) -> Set:
+    points1 = list(chord1)
+    points2 = list(chord2)
+
+    # Merge starting at join points, maintaining z-ordering
+    point1, point2 = points1[idx1], points2[idx2]
+    z1, z2 = float(point1.z), float(point2.z)
+
+    if z1 < z2:
+        # Keep first part of chord1 up to idx1, then chord2 from idx2
+        merged = set(points1[:idx1 + 1]) | set(points2[idx2:])
+    else:
+        # Keep first part of chord2 up to idx2, then chord1 from idx1
+        merged = set(points2[:idx2 + 1]) | set(points1[idx1:])
+
+    return merged
+
+
 def grow_fiber_chords(points: List,
                       bounds: npt.NDArray[np.float32],
                       num_chords: int = 4096,
@@ -214,7 +307,34 @@ def grow_fiber_chords(points: List,
         if chord:
             completed_chords.append(chord)
 
-    return completed_chords
+    print(f"len before joining {len(completed_chords)}")
+
+    # Join phase
+    positions, id_to_index = initialize_points(points, bounds)[:2]
+    joins = find_chord_joins(completed_chords, positions, id_to_index)
+
+    # Track indices of merged chords
+    merged_indices = set()
+    new_chords = []
+
+    for chord1, chord2, idx1, idx2 in joins:
+        chord1_idx = completed_chords.index(chord1)
+        chord2_idx = completed_chords.index(chord2)
+
+        if chord1_idx in merged_indices or chord2_idx in merged_indices:
+            continue
+
+        if not would_create_cycle(chord1, chord2, idx1, idx2):
+            new_chord = merge_chords(chord1, chord2, idx1, idx2)
+            merged_indices.add(chord1_idx)
+            merged_indices.add(chord2_idx)
+            new_chords.append(new_chord)
+
+    # Create final list excluding merged chords
+    final_chords = [chord for i, chord in enumerate(completed_chords) if i not in merged_indices]
+    final_chords.extend(new_chords)
+
+    return final_chords
 
 
 def get_growth_stats(chords: List[Set]) -> GrowthStats:
