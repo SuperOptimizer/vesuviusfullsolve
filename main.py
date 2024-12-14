@@ -12,8 +12,10 @@ import supervoxeler
 import snic
 from pathlib import Path
 
+import metrics
 import chord
 import render
+import patch
 
 def preprocess(chunk, ISO, sharpen, min_component_size):
 
@@ -78,12 +80,16 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_compon
     ])
 
     chords = chord.grow_fiber_chords(
-    points=superclusters,
-    bounds=bounding_box,
-    num_chords=8192,
-    min_length=8,
-    max_length=128,)
+        points=superclusters,
+        bounds=bounding_box,
+        growth_directions=['x','y','x'],  # Only grow in z direction
+        chords_per_direction=2048,  # Use full chord count for z direction
+        min_length=8,
+        max_length=128,
+    )
     print(f"got {len(chords)} chords")
+
+
 
     # Process results (similar to original code)
     all_centroids = []

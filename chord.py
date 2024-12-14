@@ -1,9 +1,9 @@
 import numpy as np
 from scipy.spatial import cKDTree
-from typing import Set, Dict, List, Tuple, Optional, NamedTuple
+from typing import Set, Dict, List, Tuple, Optional, NamedTuple, Literal
 import numpy.typing as npt
 from dataclasses import dataclass
-#chord.py
+
 
 @dataclass
 class GrowthStats:
@@ -57,42 +57,47 @@ def initialize_points(points: List, bounds: npt.NDArray[np.float32]) -> Tuple[np
     id_to_index = {id(point): i for i, point in enumerate(points)}
     return positions, id_to_index, intensities
 
+
 def select_start_points(points: List,
-                       positions: np.ndarray,
-                       intensities: np.ndarray,
-                       bounds: npt.NDArray[np.float32],
-                       target_count: int = 4096,
-                       n_layers: int = 256,
-                       min_intensity_percentile: int = 5) -> List[int]:
-   z_min, z_max = bounds[0, 0], bounds[0, 1]
-   z_step = (z_max - z_min) / n_layers
-   points_per_layer = target_count // n_layers
+                        positions: np.ndarray,
+                        intensities: np.ndarray,
+                        bounds: npt.NDArray[np.float32],
+                        growth_direction: Literal['x', 'y', 'z'],
+                        target_count: int = 4096,
+                        n_layers: int = 256,
+                        min_intensity_percentile: int = 5) -> List[int]:
+    direction_map = {'z': 0, 'y': 1, 'x': 2}
+    axis = direction_map[growth_direction]
 
-   starts = []
-   min_intensity = np.percentile(intensities, min_intensity_percentile)
+    axis_min, axis_max = bounds[axis, 0], bounds[axis, 1]
+    axis_step = (axis_max - axis_min) / n_layers
+    points_per_layer = target_count // n_layers
 
-   for layer in range(n_layers):
-       layer_mask = (positions[:, 0] >= z_min + layer * z_step) & \
-                    (positions[:, 0] < z_min + (layer + 1) * z_step)
-       layer_points = np.where(layer_mask)[0]
+    starts = []
+    min_intensity = np.percentile(intensities, min_intensity_percentile)
 
-       if len(layer_points) == 0:
-           continue
+    for layer in range(n_layers):
+        layer_mask = (positions[:, axis] >= axis_min + layer * axis_step) & \
+                     (positions[:, axis] < axis_min + (layer + 1) * axis_step)
+        layer_points = np.where(layer_mask)[0]
 
-       valid_points = [idx for idx in layer_points
-                       if intensities[idx] > min_intensity and
-                       hasattr(points[idx], 'connections') and
-                       len(points[idx].connections) >= 4]
+        if len(layer_points) == 0:
+            continue
 
-       if not valid_points:
-           continue
+        valid_points = [idx for idx in layer_points
+                        if intensities[idx] > min_intensity and
+                        hasattr(points[idx], 'connections') and
+                        len(points[idx].connections) >= 4]
 
-       selected = np.random.choice(valid_points,
-                                 size=min(points_per_layer, len(valid_points)),
-                                 replace=False)
-       starts.extend(selected)
+        if not valid_points:
+            continue
 
-   return starts
+        selected = np.random.choice(valid_points,
+                                    size=min(points_per_layer, len(valid_points)),
+                                    replace=False)
+        starts.extend(selected)
+
+    return starts
 
 
 def get_chord_direction(positions: np.ndarray, idx: int, window: int = 3) -> np.ndarray:
@@ -101,65 +106,10 @@ def get_chord_direction(positions: np.ndarray, idx: int, window: int = 3) -> np.
     if end - start < 2:
         return np.array([1, 0, 0])  # Default to z-direction
 
-    # Fit line to local points
     points = positions[start:end]
     direction = points[-1] - points[0]
     return direction / np.linalg.norm(direction)
 
-
-def find_chord_joins(chords: List[Set],
-                     positions: np.ndarray,
-                     id_to_index: Dict[int, int],
-                     max_distance: float = 2.0,
-                     min_parallel_score: float = 0.8) -> List[Tuple[Set, Set, int, int]]:
-    joins = []
-    all_positions = []
-    point_to_chord = {}
-
-    # Build spatial index
-    for chord_idx, chord in enumerate(chords):
-        for point in chord:
-            idx = id_to_index[id(point)]
-            pos = positions[idx]
-            all_positions.append(pos)
-            point_to_chord[tuple(pos)] = (chord_idx, point)
-
-    tree = cKDTree(all_positions)
-
-    # Query pairs of points within max_distance
-    pairs = tree.query_pairs(max_distance)
-
-    for pos1_idx, pos2_idx in pairs:
-        pos1 = all_positions[pos1_idx]
-        pos2 = all_positions[pos2_idx]
-
-        chord1_idx, point1 = point_to_chord[tuple(pos1)]
-        chord2_idx, point2 = point_to_chord[tuple(pos2)]
-
-        if chord1_idx >= chord2_idx:
-            continue
-
-        chord1 = chords[chord1_idx]
-        chord2 = chords[chord2_idx]
-
-        # Check direction alignment
-        dir1 = get_chord_direction(
-            np.array([positions[id_to_index[id(p)]] for p in chord1]),
-            list(chord1).index(point1)
-        )
-        dir2 = get_chord_direction(
-            np.array([positions[id_to_index[id(p)]] for p in chord2]),
-            list(chord2).index(point2)
-        )
-
-        if abs(np.dot(dir1, dir2)) > min_parallel_score:
-            joins.append((
-                chord1, chord2,
-                list(chord1).index(point1),
-                list(chord2).index(point2)
-            ))
-
-    return joins
 
 def grow_chord(start_point: int,
                points: List,
@@ -168,8 +118,12 @@ def grow_chord(start_point: int,
                id_to_index: Dict[int, int],
                available: np.ndarray,
                volume_tracker: VolumeTracker,
+               growth_direction: Literal['x', 'y', 'z'],
                min_length: int = 8,
                max_length: int = 32) -> Optional[Set]:
+    direction_map = {'z': 0, 'y': 1, 'x': 2}
+    axis = direction_map[growth_direction]
+
     current = points[start_point]
     chord = {current}
     pos = positions[start_point]
@@ -196,31 +150,29 @@ def grow_chord(start_point: int,
                 if dist < .1:
                     continue
 
-                if (direction > 0 and next_pos[0] <= current_pos[0]) or \
-                        (direction < 0 and next_pos[0] >= current_pos[0]):
+                if (direction > 0 and next_pos[axis] <= current_pos[axis]) or \
+                        (direction < 0 and next_pos[axis] >= current_pos[axis]):
                     continue
 
                 dp_norm = dp / dist
 
-                # Enforce z-direction progress
-                z_progress = direction * dp_norm[0]
-                if z_progress < 0.5:  # Require significant z movement
+                # Enforce primary direction progress
+                axis_progress = direction * dp_norm[axis]
+                if axis_progress < 0.5:  # Require significant movement along primary axis
                     continue
 
-                # Calculate smoothness using last 3 directions
                 smoothness_score = 1.0
                 if recent_dirs:
                     smoothness_scores = [np.dot(dp_norm, d) for d in recent_dirs[:3]]
                     smoothness_score = np.mean(smoothness_scores)
-                    if smoothness_score < 0.8:  # Strict smoothness requirement
+                    if smoothness_score < 0.8:
                         continue
 
                 parallel_score = volume_tracker.get_parallel_score(next_pos, dp_norm)
 
                 total_score = (
                         (strength / 255.0) * 0.4 +
-                        z_progress * 0.2 +
-                        #smoothness_score * 0.2 +
+                        axis_progress * 0.2 +
                         parallel_score * 0.4
                 )
 
@@ -243,83 +195,59 @@ def grow_chord(start_point: int,
     return chord if len(chord) >= min_length else None
 
 
-def would_create_cycle(chord1: Set, chord2: Set, idx1: int, idx2: int) -> bool:
-    # Get ordered lists of points
-    points1 = list(chord1)
-    points2 = list(chord2)
-
-    # Check if any point is shared between chords
-    return bool(chord1.intersection(chord2))
-
-
-def merge_chords(chord1: Set, chord2: Set, idx1: int, idx2: int) -> Set:
-    points1 = list(chord1)
-    points2 = list(chord2)
-
-    # Merge starting at join points, maintaining z-ordering
-    point1, point2 = points1[idx1], points2[idx2]
-    z1, z2 = float(point1.z), float(point2.z)
-
-    if z1 < z2:
-        # Keep first part of chord1 up to idx1, then chord2 from idx2
-        merged = set(points1[:idx1 + 1]) | set(points2[idx2:])
-    else:
-        # Keep first part of chord2 up to idx2, then chord1 from idx1
-        merged = set(points2[:idx2 + 1]) | set(points1[idx1:])
-
-    return merged
-
-
 def grow_fiber_chords(points: List,
                       bounds: npt.NDArray[np.float32],
-                      num_chords: int = 4096,
+                      growth_directions: List[Literal['x', 'y', 'z']] = ['z', 'y', 'x'],
+                      chords_per_direction: int = 1365,
                       min_length: int = 8,
                       max_length: int = 32) -> List[Set]:
     positions, id_to_index, intensities = initialize_points(points, bounds)
-    available = np.ones(len(points), dtype=bool)
-    volume_tracker = VolumeTracker.initialize(bounds)
+    all_chords = []
 
-    start_indices = select_start_points(
-        points, positions, intensities, bounds,
-        target_count=num_chords
-    )
+    for direction in growth_directions:
+        available = np.ones(len(points), dtype=bool)
+        volume_tracker = VolumeTracker.initialize(bounds)
 
-    if not start_indices:
-        return []
-
-    completed_chords = []
-    for i, start_idx in enumerate(start_indices):
-        if not available[start_idx]:
-            continue
-
-        chord = grow_chord(
-            start_idx,
-            points,
-            positions,
-            intensities,
-            id_to_index,
-            available,
-            volume_tracker,
-            min_length,
-            max_length
+        start_indices = select_start_points(
+            points, positions, intensities, bounds,
+            growth_direction=direction,
+            target_count=chords_per_direction
         )
 
-        if chord:
-            completed_chords.append(chord)
+        if not start_indices:
+            continue
 
-    print(f"len before joining {len(completed_chords)}")
+        completed_chords = []
+        for start_idx in start_indices:
+            if not available[start_idx]:
+                continue
 
-    # Join phase
-    positions, id_to_index = initialize_points(points, bounds)[:2]
-    joins = find_chord_joins(completed_chords, positions, id_to_index)
+            chord = grow_chord(
+                start_idx,
+                points,
+                positions,
+                intensities,
+                id_to_index,
+                available,
+                volume_tracker,
+                growth_direction=direction,
+                min_length=min_length,
+                max_length=max_length
+            )
 
-    # Track indices of merged chords
+            if chord:
+                completed_chords.append(chord)
+
+        all_chords.extend(completed_chords)
+
+    # Join phase (remains unchanged but operates on all_chords)
+    joins = find_chord_joins(all_chords, positions, id_to_index)
     merged_indices = set()
     new_chords = []
 
     for chord1, chord2, idx1, idx2 in joins:
-        chord1_idx = completed_chords.index(chord1)
-        chord2_idx = completed_chords.index(chord2)
+        chord1_idx = all_chords.index(chord1)
+        chord2_idx = all_chords.index(chord2)
 
         if chord1_idx in merged_indices or chord2_idx in merged_indices:
             continue
@@ -330,11 +258,81 @@ def grow_fiber_chords(points: List,
             merged_indices.add(chord2_idx)
             new_chords.append(new_chord)
 
-    # Create final list excluding merged chords
-    final_chords = [chord for i, chord in enumerate(completed_chords) if i not in merged_indices]
+    final_chords = [chord for i, chord in enumerate(all_chords) if i not in merged_indices]
     final_chords.extend(new_chords)
 
     return final_chords
+
+
+# The following functions remain unchanged
+def find_chord_joins(chords: List[Set],
+                     positions: np.ndarray,
+                     id_to_index: Dict[int, int],
+                     max_distance: float = 2.0,
+                     min_parallel_score: float = 0.8) -> List[Tuple[Set, Set, int, int]]:
+    # ... (implementation remains the same)
+    joins = []
+    all_positions = []
+    point_to_chord = {}
+
+    for chord_idx, chord in enumerate(chords):
+        for point in chord:
+            idx = id_to_index[id(point)]
+            pos = positions[idx]
+            all_positions.append(pos)
+            point_to_chord[tuple(pos)] = (chord_idx, point)
+
+    tree = cKDTree(all_positions)
+    pairs = tree.query_pairs(max_distance)
+
+    for pos1_idx, pos2_idx in pairs:
+        pos1 = all_positions[pos1_idx]
+        pos2 = all_positions[pos2_idx]
+
+        chord1_idx, point1 = point_to_chord[tuple(pos1)]
+        chord2_idx, point2 = point_to_chord[tuple(pos2)]
+
+        if chord1_idx >= chord2_idx:
+            continue
+
+        chord1 = chords[chord1_idx]
+        chord2 = chords[chord2_idx]
+
+        dir1 = get_chord_direction(
+            np.array([positions[id_to_index[id(p)]] for p in chord1]),
+            list(chord1).index(point1)
+        )
+        dir2 = get_chord_direction(
+            np.array([positions[id_to_index[id(p)]] for p in chord2]),
+            list(chord2).index(point2)
+        )
+
+        if abs(np.dot(dir1, dir2)) > min_parallel_score:
+            joins.append((
+                chord1, chord2,
+                list(chord1).index(point1),
+                list(chord2).index(point2)
+            ))
+
+    return joins
+
+
+def would_create_cycle(chord1: Set, chord2: Set, idx1: int, idx2: int) -> bool:
+    return bool(chord1.intersection(chord2))
+
+
+def merge_chords(chord1: Set, chord2: Set, idx1: int, idx2: int) -> Set:
+    points1 = list(chord1)
+    points2 = list(chord2)
+    point1, point2 = points1[idx1], points2[idx2]
+    z1, z2 = float(point1.z), float(point2.z)
+
+    if z1 < z2:
+        merged = set(points1[:idx1 + 1]) | set(points2[idx2:])
+    else:
+        merged = set(points2[:idx2 + 1]) | set(points1[idx1:])
+
+    return merged
 
 
 def get_growth_stats(chords: List[Set]) -> GrowthStats:
