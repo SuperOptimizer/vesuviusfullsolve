@@ -57,54 +57,42 @@ def initialize_points(points: List, bounds: npt.NDArray[np.float32]) -> Tuple[np
     id_to_index = {id(point): i for i, point in enumerate(points)}
     return positions, id_to_index, intensities
 
-
 def select_start_points(points: List,
-                        positions: np.ndarray,
-                        intensities: np.ndarray,
-                        bounds: npt.NDArray[np.float32],
-                        target_count: int = 4096,
-                        min_intensity_percentile: int = 30) -> List[int]:
-    z_min, z_max = bounds[0, 0], bounds[0, 1]
-    n_layers = int(np.sqrt(target_count))
-    z_step = (z_max - z_min) / n_layers
-    points_per_layer = target_count // n_layers
+                       positions: np.ndarray,
+                       intensities: np.ndarray,
+                       bounds: npt.NDArray[np.float32],
+                       target_count: int = 4096,
+                       n_layers: int = 256,
+                       min_intensity_percentile: int = 5) -> List[int]:
+   z_min, z_max = bounds[0, 0], bounds[0, 1]
+   z_step = (z_max - z_min) / n_layers
+   points_per_layer = target_count // n_layers
 
-    starts = []
-    min_intensity = np.percentile(intensities, min_intensity_percentile)
-    spatial_index = cKDTree(positions)
+   starts = []
+   min_intensity = np.percentile(intensities, min_intensity_percentile)
 
-    for layer in range(n_layers):
-        layer_mask = (positions[:, 0] >= z_min + layer * z_step) & \
-                     (positions[:, 0] < z_min + (layer + 1) * z_step)
-        layer_points = np.where(layer_mask)[0]
+   for layer in range(n_layers):
+       layer_mask = (positions[:, 0] >= z_min + layer * z_step) & \
+                    (positions[:, 0] < z_min + (layer + 1) * z_step)
+       layer_points = np.where(layer_mask)[0]
 
-        if len(layer_points) == 0:
-            continue
+       if len(layer_points) == 0:
+           continue
 
-        valid_points = [idx for idx in layer_points
-                        if intensities[idx] > min_intensity and
-                        hasattr(points[idx], 'connections') and
-                        len(points[idx].connections) >= 4]
+       valid_points = [idx for idx in layer_points
+                       if intensities[idx] > min_intensity and
+                       hasattr(points[idx], 'connections') and
+                       len(points[idx].connections) >= 4]
 
-        if not valid_points:
-            continue
+       if not valid_points:
+           continue
 
-        selected = []
-        while len(selected) < points_per_layer and valid_points:
-            idx = np.random.choice(valid_points)
-            if selected:
-                nearest_dist = min(np.linalg.norm(positions[idx] - positions[s])
-                                   for s in selected)
-                if nearest_dist < z_step / 2:
-                    continue
-            selected.append(idx)
-            valid_points.remove(idx)
+       selected = np.random.choice(valid_points,
+                                 size=min(points_per_layer, len(valid_points)),
+                                 replace=False)
+       starts.extend(selected)
 
-        starts.extend(selected)
-        if len(starts) >= target_count:
-            break
-
-    return starts
+   return starts
 
 
 def grow_chord(start_point: int,
@@ -139,7 +127,7 @@ def grow_chord(start_point: int,
                 dp = next_pos - current_pos
                 dist = np.linalg.norm(dp)
 
-                if dist < 0.1:
+                if dist < .1:
                     continue
 
                 if (direction > 0 and next_pos[0] <= current_pos[0]) or \
@@ -165,9 +153,9 @@ def grow_chord(start_point: int,
 
                 total_score = (
                         (strength / 255.0) * 0.3 +
-                        z_progress * 0.2 +  # Heavily weight z-direction progress
-                        smoothness_score * 0.3 +
-                        parallel_score * 0.2
+                        z_progress * 0.4 +
+                        #smoothness_score * 0.2 +
+                        parallel_score * 0.3
                 )
 
                 candidates.append((idx, next_pos, total_score, dp_norm))

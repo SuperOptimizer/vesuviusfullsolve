@@ -148,7 +148,7 @@ def run_snic(
     # Map from C label -> Python Superpixel object
     label_to_superpixel = {}
 
-    max_connections=32
+    max_connections=64
 
     empty_count = 0
     for i in range(1, max_superpixels):  # Skip index 0
