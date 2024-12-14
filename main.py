@@ -33,9 +33,13 @@ def preprocess(chunk, ISO, sharpen, min_component_size):
     processed = pipeline.apply_chunked_glcae_3d(processed)
     processed = pipeline.segment_and_clean(processed,ISO,ISO+32)
 
-    dilated = skimage.morphology.binary_dilation(processed > 0, footprint=skimage.morphology.ball(1))
-    eroded = skimage.morphology.binary_erosion(dilated > 0, footprint=skimage.morphology.ball(2))
-    processed[~eroded] = 0
+    eroded = skimage.morphology.binary_erosion(processed > 0, footprint=skimage.morphology.ball(1))
+    dilated = skimage.morphology.binary_dilation(eroded > 0, footprint=skimage.morphology.ball(2))
+    processed[~dilated] = 0
+
+    eroded = skimage.morphology.binary_erosion(processed > 0, footprint=skimage.morphology.ball(2))
+    dilated = skimage.morphology.binary_dilation(eroded > 0, footprint=skimage.morphology.ball(1))
+    processed[~dilated] = 0
 
     binary = processed > 0
     labeled = skimage.measure.label(binary, connectivity=3)
@@ -84,8 +88,8 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_compon
         bounds=bounding_box,
         growth_directions=['z','y','x'],  # Only grow in z direction
         chords_per_direction=8192,
-        min_length=8,
-        max_length=128,
+        min_length=12,
+        max_length=64,
     )
     print(f"got {len(chords)} chords")
 
@@ -177,7 +181,7 @@ def main():
                 g[mask] = color_u8[1]
                 b[mask] = color_u8[2]
             else:
-                color_u8 = np.array([80,80,80],dtype=np.uint8)
+                color_u8 = np.array([20,20,20],dtype=np.uint8)
                 mask = np.array(all_chord_indices) == idx
                 r[mask] = color_u8[0]
                 g[mask] = color_u8[1]

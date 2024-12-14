@@ -171,9 +171,9 @@ def grow_chord(start_point: int,
                 parallel_score = volume_tracker.get_parallel_score(next_pos, dp_norm)
 
                 total_score = (
-                        (strength / 255.0) * 0.4 +
+                        (strength / 255.0) * 0.2 +
                         axis_progress * 0.2 +
-                        parallel_score * 0.4
+                        parallel_score * 0.6
                 )
 
                 candidates.append((idx, next_pos, total_score, dp_norm))
