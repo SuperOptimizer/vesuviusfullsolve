@@ -82,8 +82,8 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_compon
     chords = chord.grow_fiber_chords(
         points=superclusters,
         bounds=bounding_box,
-        growth_directions=['x','y','x'],  # Only grow in z direction
-        chords_per_direction=2048,  # Use full chord count for z direction
+        growth_directions=['z','y','x'],  # Only grow in z direction
+        chords_per_direction=8192,
         min_length=8,
         max_length=128,
     )
@@ -143,9 +143,9 @@ def main():
 
     # Prepare colors
     # Initialize all points as dark gray (51, 51, 51)
-    r = np.full(len(centroids), 51, dtype=np.uint8)
-    g = np.full(len(centroids), 51, dtype=np.uint8)
-    b = np.full(len(centroids), 51, dtype=np.uint8)
+    r = np.full(len(centroids), 21, dtype=np.uint8)
+    g = np.full(len(centroids), 21, dtype=np.uint8)
+    b = np.full(len(centroids), 21, dtype=np.uint8)
 
     # Color patches using viridis
     patch_mask = np.array(all_chord_indices) >= 0
