@@ -33,13 +33,13 @@ def preprocess(chunk, ISO, sharpen, min_component_size):
     processed = pipeline.apply_chunked_glcae_3d(processed)
     processed = pipeline.segment_and_clean(processed,ISO,ISO+32)
 
-    eroded = skimage.morphology.binary_erosion(processed > 0, footprint=skimage.morphology.ball(1))
-    dilated = skimage.morphology.binary_dilation(eroded > 0, footprint=skimage.morphology.ball(2))
-    processed[~dilated] = 0
+    #eroded = skimage.morphology.binary_erosion(processed > 0, footprint=skimage.morphology.ball(1))
+    #dilated = skimage.morphology.binary_dilation(eroded > 0, footprint=skimage.morphology.ball(2))
+    #processed[~dilated] = 0
 
-    eroded = skimage.morphology.binary_erosion(processed > 0, footprint=skimage.morphology.ball(2))
-    dilated = skimage.morphology.binary_dilation(eroded > 0, footprint=skimage.morphology.ball(1))
-    processed[~dilated] = 0
+    #eroded = skimage.morphology.binary_erosion(processed > 0, footprint=skimage.morphology.ball(2))
+    #dilated = skimage.morphology.binary_dilation(eroded > 0, footprint=skimage.morphology.ball(1))
+    #processed[~dilated] = 0
 
     binary = processed > 0
     labeled = skimage.measure.label(binary, connectivity=3)
@@ -83,14 +83,17 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_compon
         [0, chunk_dims[2]],
     ])
 
-    chords = chord.grow_fiber_chords(
+    zchords, ychords, xchords = chord.grow_fiber_chords(
         points=superclusters,
         bounds=bounding_box,
-        growth_directions=['z','y','x'],  # Only grow in z direction
-        chords_per_direction=8192,
-        min_length=12,
+        min_length=4,
         max_length=64,
+        num_chords=16384
     )
+    chords = [*zchords, *ychords, *xchords]
+    print(f"got {len(zchords)} zchords")
+    print(f"got {len(ychords)} ychords")
+    print(f"got {len(xchords)} xchords")
     print(f"got {len(chords)} chords")
 
 
@@ -112,9 +115,9 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_compon
         all_chord_indices.extend(chord_indices)
 
     numused = len(all_centroids)
-    all_centroids.extend([(sp.z, sp.y, sp.x) for sp in superclusters])
-    all_values.extend(sp.c*.5 for sp in superclusters)
-    all_chord_indices.extend([-1]*(len(all_values)-len(all_chord_indices)))
+    #all_centroids.extend([(sp.z, sp.y, sp.x) for sp in superclusters])
+    #all_values.extend(sp.c*.5 for sp in superclusters)
+    #all_chord_indices.extend([-1]*(len(all_values)-len(all_chord_indices)))
 
     return all_centroids, all_values, all_chord_indices
 
@@ -122,9 +125,9 @@ def main():
 
     # Set up paths
     # keep if commented out
-    #SCROLL_PATH = Path("/Users/forrest/dl.ash2txt.org/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/1")
+    SCROLL_PATH = Path("/Users/forrest/dl.ash2txt.org/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/1")
     #SCROLL_PATH = Path("/Users/forrest/dl.ash2txt.org/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/")
-    SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/0")
+    #SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/0")
     #SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll1/PHercParis4.volpkg/volumes_zarr_standardized/54keV_7.91um_Scroll1A.zarr/0")
 
     OUTPUT_DIR = Path("output")
@@ -137,7 +140,7 @@ def main():
     snic.compile_snic('./c/snic.c','./libsnic.so')
 
 
-    chunk_coords=(4096, 3072, 3072)
+    chunk_coords=(2048, 2048, 2048)
     chunk_dims=(256,256,256)
     ISO=32
     sharpen=1

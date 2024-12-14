@@ -62,13 +62,10 @@ def select_start_points(points: List,
                         positions: np.ndarray,
                         intensities: np.ndarray,
                         bounds: npt.NDArray[np.float32],
-                        growth_direction: Literal['x', 'y', 'z'],
                         target_count: int = 4096,
                         n_layers: int = 256,
-                        min_intensity_percentile: int = 5) -> List[int]:
-    direction_map = {'z': 0, 'y': 1, 'x': 2}
-    axis = direction_map[growth_direction]
-
+                        min_intensity_percentile: int = 5,
+                        axis: int = 0) -> List[int]:
     axis_min, axis_max = bounds[axis, 0], bounds[axis, 1]
     axis_step = (axis_max - axis_min) / n_layers
     points_per_layer = target_count // n_layers
@@ -118,12 +115,9 @@ def grow_chord(start_point: int,
                id_to_index: Dict[int, int],
                available: np.ndarray,
                volume_tracker: VolumeTracker,
-               growth_direction: Literal['x', 'y', 'z'],
                min_length: int = 8,
-               max_length: int = 32) -> Optional[Set]:
-    direction_map = {'z': 0, 'y': 1, 'x': 2}
-    axis = direction_map[growth_direction]
-
+               max_length: int = 32,
+               axis: int = 0) -> Optional[Set]:
     current = points[start_point]
     chord = {current}
     pos = positions[start_point]
@@ -156,9 +150,8 @@ def grow_chord(start_point: int,
 
                 dp_norm = dp / dist
 
-                # Enforce primary direction progress
                 axis_progress = direction * dp_norm[axis]
-                if axis_progress < 0.5:  # Require significant movement along primary axis
+                if axis_progress < 0.5:
                     continue
 
                 smoothness_score = 1.0
@@ -171,9 +164,9 @@ def grow_chord(start_point: int,
                 parallel_score = volume_tracker.get_parallel_score(next_pos, dp_norm)
 
                 total_score = (
-                        (strength / 255.0) * 0.2 +
-                        axis_progress * 0.2 +
-                        parallel_score * 0.6
+                    (strength / 255.0) * 0.4 +
+                    axis_progress * 0.2 +
+                    parallel_score * 0.4
                 )
 
                 candidates.append((idx, next_pos, total_score, dp_norm))
@@ -197,80 +190,70 @@ def grow_chord(start_point: int,
 
 def grow_fiber_chords(points: List,
                       bounds: npt.NDArray[np.float32],
-                      growth_directions: List[Literal['x', 'y', 'z']] = ['z', 'y', 'x'],
-                      chords_per_direction: int = 1365,
+                      num_chords: int = 4096,
                       min_length: int = 8,
-                      max_length: int = 32) -> List[Set]:
+                      max_length: int = 32) -> Tuple[List[Set], List[Set], List[Set]]:
     positions, id_to_index, intensities = initialize_points(points, bounds)
-    all_chords = []
+    chords_per_direction = num_chords // 3
 
-    for direction in growth_directions:
-        available = np.ones(len(points), dtype=bool)
-        volume_tracker = VolumeTracker.initialize(bounds)
+    z_chords = []
+    y_chords = []
+    x_chords = []
 
-        start_indices = select_start_points(
-            points, positions, intensities, bounds,
-            growth_direction=direction,
-            target_count=chords_per_direction
-        )
+    # Grow Z direction chords
+    available = np.ones(len(points), dtype=bool)
+    volume_tracker = VolumeTracker.initialize(bounds)
+    start_indices = select_start_points(points, positions, intensities, bounds,
+                                        target_count=chords_per_direction)
 
-        if not start_indices:
+    for start_idx in start_indices:
+        if not available[start_idx]:
             continue
+        chord = grow_chord(start_idx, points, positions, intensities,
+                           id_to_index, available, volume_tracker,
+                           min_length=min_length, max_length=max_length)
+        if chord:
+            z_chords.append(chord)
 
-        completed_chords = []
-        for start_idx in start_indices:
-            if not available[start_idx]:
-                continue
+    # Grow Y direction chords
+    available = np.ones(len(points), dtype=bool)
+    volume_tracker = VolumeTracker.initialize(bounds)
+    start_indices = select_start_points(points, positions, intensities, bounds,
+                                        target_count=chords_per_direction)
 
-            chord = grow_chord(
-                start_idx,
-                points,
-                positions,
-                intensities,
-                id_to_index,
-                available,
-                volume_tracker,
-                growth_direction=direction,
-                min_length=min_length,
-                max_length=max_length
-            )
-
-            if chord:
-                completed_chords.append(chord)
-
-        all_chords.extend(completed_chords)
-
-    # Join phase (remains unchanged but operates on all_chords)
-    joins = find_chord_joins(all_chords, positions, id_to_index)
-    merged_indices = set()
-    new_chords = []
-
-    for chord1, chord2, idx1, idx2 in joins:
-        chord1_idx = all_chords.index(chord1)
-        chord2_idx = all_chords.index(chord2)
-
-        if chord1_idx in merged_indices or chord2_idx in merged_indices:
+    for start_idx in start_indices:
+        if not available[start_idx]:
             continue
+        chord = grow_chord(start_idx, points, positions, intensities,
+                           id_to_index, available, volume_tracker,
+                           axis=1, min_length=min_length, max_length=max_length)
+        if chord:
+            y_chords.append(chord)
 
-        if not would_create_cycle(chord1, chord2, idx1, idx2):
-            new_chord = merge_chords(chord1, chord2, idx1, idx2)
-            merged_indices.add(chord1_idx)
-            merged_indices.add(chord2_idx)
-            new_chords.append(new_chord)
+    # Grow X direction chords
+    available = np.ones(len(points), dtype=bool)
+    volume_tracker = VolumeTracker.initialize(bounds)
+    start_indices = select_start_points(points, positions, intensities, bounds,
+                                        target_count=chords_per_direction)
 
-    final_chords = [chord for i, chord in enumerate(all_chords) if i not in merged_indices]
-    final_chords.extend(new_chords)
+    for start_idx in start_indices:
+        if not available[start_idx]:
+            continue
+        chord = grow_chord(start_idx, points, positions, intensities,
+                           id_to_index, available, volume_tracker,
+                           axis=2, min_length=min_length, max_length=max_length)
+        if chord:
+            x_chords.append(chord)
 
-    return final_chords
+    return z_chords, y_chords, x_chords
 
 
-# The following functions remain unchanged
 def find_chord_joins(chords: List[Set],
                      positions: np.ndarray,
                      id_to_index: Dict[int, int],
                      max_distance: float = 2.0,
                      min_parallel_score: float = 0.8) -> List[Tuple[Set, Set, int, int]]:
-    # ... (implementation remains the same)
+
     joins = []
     all_positions = []
     point_to_chord = {}
