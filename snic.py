@@ -148,6 +148,8 @@ def run_snic(
     # Map from C label -> Python Superpixel object
     label_to_superpixel = {}
 
+    max_connections=32
+
     empty_count = 0
     for i in range(1, max_superpixels):  # Skip index 0
         sp = superpixels[i]
@@ -162,19 +164,28 @@ def run_snic(
             empty_count += 1
 
     # Second pass: Add connections using Superpixel object references
+    # Modified second pass to keep top N connections
     for i in range(1, max_superpixels):
         if i in label_to_superpixel:  # If this is a valid superpixel
             current_superpixel = label_to_superpixel[i]
 
+            # Collect all valid connections first
+            all_connections = []
             if connections[i].num_connections > 0:
                 for j in range(connections[i].num_connections):
                     conn = connections[i].connections[j]
                     neighbor_label = conn.neighbor_label
 
-                    # Only add connection if neighbor exists
                     if neighbor_label in label_to_superpixel:
                         neighbor_superpixel = label_to_superpixel[neighbor_label]
-                        current_superpixel.connections[neighbor_superpixel] = conn.connection_strength
+                        all_connections.append((neighbor_superpixel, conn.connection_strength))
+
+            # Sort connections by strength (highest to lowest) and keep top N
+            sorted_connections = sorted(all_connections, key=lambda x: x[1], reverse=True)
+            top_connections = sorted_connections[:max_connections]
+
+            # Store only the top N connections
+            current_superpixel.connections = {sp: strength for sp, strength in top_connections}
 
     # Free C memory
     lib.free_superpixel_connections(connections, max_superpixels - 1)
