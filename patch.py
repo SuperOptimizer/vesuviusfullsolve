@@ -1,196 +1,301 @@
 from dataclasses import dataclass
 import numpy as np
-from typing import List, Set, Tuple, Dict
 from scipy.spatial import cKDTree
+from typing import List, Set, Dict, Tuple
+import numpy.typing as npt
 
-from metrics import DriftMetrics
 
 @dataclass
-class Patch:
-    chords: List[Set]
-    direction: np.ndarray
-    centroid: np.ndarray
-    bounds: Tuple[np.ndarray, np.ndarray]
+class PatchStats:
+    total_patches: int
+    avg_points_per_patch: float
+    planarity_scores: List[float]
 
 
-def find_horizontal_chords(chords: List[Set],
-                           positions: np.ndarray,
-                           id_to_index: Dict[int, int],
-                           drift_metrics: List[DriftMetrics],
-                           min_xy_ratio: float = 1.5,
-                           max_z_angle: float = 45) -> List[Set]:
-    print(f"\nAnalyzing {len(chords)} chords for horizontal sections...")
-
-    endpoints = np.array([[positions[id_to_index[id(list(chord)[0])]],
-                           positions[id_to_index[id(list(chord)[-1])]]]
-                          for chord in chords])
-
-    directions = endpoints[:, 1] - endpoints[:, 0]
-
-    xy_movement = np.sqrt(directions[:, 1] ** 2 + directions[:, 2] ** 2)
-    z_movement = np.abs(directions[:, 0])
-
-    mask = z_movement > 0.1
-    xy_z_ratio = np.zeros_like(z_movement)
-    xy_z_ratio[mask] = xy_movement[mask] / z_movement[mask]
-
-    norms = np.linalg.norm(directions, axis=1)
-    z_angles = np.degrees(np.arccos(np.clip(np.abs(directions[:, 0]) / norms, -1.0, 1.0)))
-
-    drift_lookup = {tuple(m.final_pos): m.drift_magnitude for m in drift_metrics}
-    chord_drifts = np.array([
-        np.mean([drift_lookup.get(tuple(positions[id_to_index[id(p)]]), 0)
-                 for p in chord])
-        for chord in chords
-    ])
-
-    # Statistics before filtering
-    print(
-        f"XY/Z ratio stats: min={np.min(xy_z_ratio):.2f}, max={np.max(xy_z_ratio):.2f}, mean={np.mean(xy_z_ratio):.2f}")
-    print(f"Z-angle stats: min={np.min(z_angles):.2f}, max={np.max(z_angles):.2f}, mean={np.mean(z_angles):.2f}")
-    print(
-        f"Drift stats: min={np.min(chord_drifts):.2f}, max={np.max(chord_drifts):.2f}, mean={np.mean(chord_drifts):.2f}")
-
-    ratio_mask = xy_z_ratio > min_xy_ratio
-    angle_mask = z_angles > max_z_angle
-    drift_mask = chord_drifts > 1.5
-
-    print(f"\nFilter results:")
-    print(f"Chords passing XY/Z ratio filter: {np.sum(ratio_mask)} ({np.mean(ratio_mask) * 100:.1f}%)")
-    print(f"Chords passing angle filter: {np.sum(angle_mask)} ({np.mean(angle_mask) * 100:.1f}%)")
-    print(f"Chords passing drift filter: {np.sum(drift_mask)} ({np.mean(drift_mask) * 100:.1f}%)")
-
-    horizontal_mask = ratio_mask & angle_mask & drift_mask
-    horizontal = [chord for i, chord in enumerate(chords) if horizontal_mask[i]]
-
-    return horizontal
-
-
-def grow_patches(horizontal_chords: List[Set],
-                 positions: np.ndarray,
-                 id_to_index: Dict[int, int],
-                 max_distance: float = 7.0,
-                 min_parallel_score: float = 0.7) -> List[Patch]:
-    print(f"\nGrowing patches from {len(horizontal_chords)} horizontal chords...")
-
-    if not horizontal_chords or len(horizontal_chords) < 2:
-        return []
-
+def vectorized_find_crossings(chords: List[Set],
+                              positions: np.ndarray,
+                              id_to_index: Dict[int, int],
+                              max_distance: float = 3.0) -> List[Tuple[int, int, float]]:
     # Pre-compute chord data
     chord_data = []
-    chord_lengths = []
-    for chord in horizontal_chords:
-        points = [positions[id_to_index[id(p)]] for p in chord]
-        points_array = np.array(points)
-        start, end = points_array[0], points_array[-1]
-        direction = end - start
-        direction = direction / np.linalg.norm(direction)
-        centroid = np.mean(points_array, axis=0)
-        chord_data.append((centroid, direction, points_array))
-        chord_lengths.append(len(points))
+    for chord in chords:
+        points = np.array([positions[id_to_index[id(p)]] for p in chord])
+        centroid = np.mean(points, axis=0)
+        direction = points[-1] - points[0]
+        direction /= np.linalg.norm(direction)
+        chord_data.append((centroid, direction))
 
-    print(f"Chord length stats: min={min(chord_lengths)}, max={max(chord_lengths)}, mean={np.mean(chord_lengths):.1f}")
+    centroids = np.array([c for c, _ in chord_data])
+    directions = np.array([d for _, d in chord_data])
 
-    centroids = np.array([data[0] for data in chord_data])
-    directions = np.array([data[1] for data in chord_data])
-
-    # Spatial analysis
+    # Find close pairs
     tree = cKDTree(centroids)
     pairs = tree.query_pairs(max_distance, output_type='ndarray')
-
-    print(f"Found {len(pairs)} potential chord pairs within {max_distance} units")
 
     if len(pairs) == 0:
         return []
 
-    alignments = np.abs(np.sum(directions[pairs[:, 0]] * directions[pairs[:, 1]], axis=1))
-    print(
-        f"Alignment scores: min={np.min(alignments):.3f}, max={np.max(alignments):.3f}, mean={np.mean(alignments):.3f}")
+    # Compute angles between directions
+    dir_products = np.abs(directions[pairs[:, 0]] * directions[pairs[:, 1]]).sum(axis=1)
+    valid_angles = dir_products < 0.8
 
-    valid_pairs = pairs[alignments > min_parallel_score]
-    print(f"Found {len(valid_pairs)} valid parallel pairs ({len(valid_pairs) / len(pairs) * 100:.1f}% of total)")
+    valid_pairs = pairs[valid_angles]
+    valid_dists = np.linalg.norm(centroids[valid_pairs[:, 0]] - centroids[valid_pairs[:, 1]], axis=1)
 
-    if len(valid_pairs) == 0:
-        return []
+    return [(int(i), int(j), float(d)) for i, j, d in zip(valid_pairs[:, 0], valid_pairs[:, 1], valid_dists)]
 
-    # Union-find grouping
-    n_chords = len(horizontal_chords)
-    parents = np.arange(n_chords)
-    ranks = np.zeros(n_chords, dtype=int)
 
-    def find(x):
-        if parents[x] != x:
-            parents[x] = find(parents[x])
-        return parents[x]
+def grow_patches_parallel(seed_crossings: List[Tuple[int, int, float]],
+                          chords: List[Set],
+                          positions: np.ndarray,
+                          id_to_index: Dict[int, int],
+                          target_size: int = 16) -> List[List[Set]]:
+    # Pre-compute chord data
+    chord_data = []
+    for chord in chords:
+        points = np.array([positions[id_to_index[id(p)]] for p in chord])
+        chord_data.append({
+            'points': points,
+            'center': np.mean(points, axis=0),
+            'dir': (points[-1] - points[0]) / np.linalg.norm(points[-1] - points[0]),
+            'size': len(points)
+        })
 
-    def union(x, y):
-        px, py = find(x), find(y)
-        if px == py:
-            return
-        if ranks[px] < ranks[py]:
-            parents[px] = py
-        elif ranks[px] > ranks[py]:
-            parents[py] = px
-        else:
-            parents[py] = px
-            ranks[px] += 1
+    centers = np.array([d['center'] for d in chord_data])
+    dirs = np.array([d['dir'] for d in chord_data])
+    sizes = np.array([d['size'] for d in chord_data])
 
-    for i, j in valid_pairs:
-        union(i, j)
-
-    # Collect and analyze groups
-    groups = {}
-    for i in range(n_chords):
-        root = find(i)
-        if root not in groups:
-            groups[root] = []
-        groups[root].append(i)
-
-    group_sizes = [len(g) for g in groups.values()]
-    print(f"\nPatch group stats:")
-    print(f"Total groups: {len(groups)}")
-    print(f"Group sizes: min={min(group_sizes)}, max={max(group_sizes)}, mean={np.mean(group_sizes):.1f}")
-
-    # Create final patches
-    patches = []
-    for indices in groups.values():
-        if len(indices) < 2:
+    # Initialize all patches
+    active_patches = []
+    for seed_idx, cross_idx, _ in seed_crossings:
+        normal = np.cross(dirs[seed_idx], dirs[cross_idx])
+        if np.linalg.norm(normal) < 0.05:
             continue
 
-        group_chords = [horizontal_chords[i] for i in indices]
-        group_points = np.vstack([chord_data[i][2] for i in indices])
+        patch_size = sizes[seed_idx] + sizes[cross_idx]
+        if patch_size > target_size * 1.5:
+            continue
 
-        patch = Patch(
-            chords=group_chords,
-            direction=np.mean(directions[indices], axis=0),
-            centroid=np.mean(group_points, axis=0),
-            bounds=(np.min(group_points, axis=0), np.max(group_points, axis=0))
-        )
-        patches.append(patch)
+        active_patches.append({
+            'chords': {seed_idx, cross_idx},
+            'size': patch_size,
+            'normal': normal / np.linalg.norm(normal),
+            'center': (centers[seed_idx] * sizes[seed_idx] +
+                       centers[cross_idx] * sizes[cross_idx]) / patch_size
+        })
 
-    print(f"\nCreated {len(patches)} final patches")
-    return patches
+    # Grow all patches simultaneously until no more growth possible
+    available = np.ones(len(chords), dtype=bool)
+    for p in active_patches:
+        for idx in p['chords']:
+            available[idx] = False
+
+    while True:
+        added = False
+
+        # Score all remaining chords for all patches at once
+        for patch in active_patches:
+            if patch['size'] >= target_size:
+                continue
+
+            dists = np.linalg.norm(centers - patch['center'], axis=1)
+            plane_scores = np.abs(np.dot(centers - patch['center'], patch['normal']))
+            dir_scores = np.abs(np.dot(dirs, patch['normal']))
+
+            scores = dists + 2.0 * plane_scores + 5.0 * dir_scores
+            size_mask = (patch['size'] + sizes) <= target_size * 1.2
+            valid_mask = available & size_mask
+            candidate_scores = np.where(valid_mask, scores, np.inf)
+
+            best_idx = np.argmin(candidate_scores)
+            if candidate_scores[best_idx] < np.inf:
+                added = True
+                available[best_idx] = False
+                patch['chords'].add(best_idx)
+                patch['size'] += sizes[best_idx]
+
+                # Update patch center
+                weight = sizes[best_idx] / patch['size']
+                patch['center'] = (1 - weight) * patch['center'] + weight * centers[best_idx]
+
+        if not added:
+            break
+
+    # Convert to final format
+    return [[chords[i] for i in p['chords']]
+            for p in active_patches
+            if len(p['chords']) >= 3]
 
 
-def analyze_patches(patches: List[Patch], volume_shape: Tuple[int, int, int]) -> None:
-    if not patches:
-        print("\nNo patches found")
-        return
+def generate_patches(z_chords: List[Set],
+                     y_chords: List[Set],
+                     x_chords: List[Set],
+                     positions: np.ndarray,
+                     id_to_index: Dict[int, int]) -> List[List[Set]]:
+    all_chords = z_chords + y_chords + x_chords
+    crossings = vectorized_find_crossings(all_chords, positions, id_to_index)
+    return grow_patches_parallel(crossings, all_chords, positions, id_to_index)
 
-    total_chords = sum(len(p.chords) for p in patches)
-    avg_chords = total_chords / len(patches)
 
-    patch_sizes = np.array([p.bounds[1] - p.bounds[0] for p in patches])
-    patch_volumes = np.prod(patch_sizes, axis=1)
+from dataclasses import dataclass
+from typing import Dict, List, Set, Tuple
+import numpy as np
+import logging
 
-    print(f"\nDetailed patch analysis:")
-    print(f"Total patches: {len(patches)}")
-    print(f"Total chords in patches: {total_chords}")
-    print(f"Chords per patch: min={min(len(p.chords) for p in patches)}, "
-          f"max={max(len(p.chords) for p in patches)}, mean={avg_chords:.1f}")
-    print(f"Patch dimensions (z,y,x):")
-    print(f"  Min: {np.min(patch_sizes, axis=0)}")
-    print(f"  Max: {np.max(patch_sizes, axis=0)}")
-    print(f"  Mean: {np.mean(patch_sizes, axis=0)}")
-    print(f"Patch volumes: min={np.min(patch_volumes):.1f}, "
-          f"max={np.max(patch_volumes):.1f}, mean={np.mean(patch_volumes):.1f}")
+
+@dataclass
+class PatchMetrics:
+    size: int
+    planarity: float  # Average distance to patch plane
+    compactness: float  # Average distance to center
+    dir_alignment: float  # Average chord direction alignment
+    growth_history: List[Tuple[int, float]]  # (chord_idx, score)
+
+
+@dataclass
+class GrowthStats:
+    total_patches_started: int
+    patches_completed: int
+    avg_growth_iterations: float
+    failed_additions: int
+    size_distribution: Dict[int, int]
+    planarity_scores: List[float]
+    rejected_reasons: Dict[str, int]
+
+
+def grow_patches_iterative(seed_crossings: List[Tuple[int, int, float]],
+                           chords: List[Set],
+                           positions: np.ndarray,
+                           id_to_index: Dict[int, int],
+                           target_size: int = 16,
+                           debug: bool = True) -> Tuple[List[List[Set]], GrowthStats]:
+    logging.info(f"Starting patch growth with {len(seed_crossings)} seed pairs")
+
+    stats = GrowthStats(
+        total_patches_started=0,
+        patches_completed=0,
+        avg_growth_iterations=0,
+        failed_additions=0,
+        size_distribution={},
+        planarity_scores=[],
+        rejected_reasons={'angle': 0, 'size': 0, 'no_candidates': 0}
+    )
+
+    # Initialize chord data with debug info
+    chord_data = []
+    for i, chord in enumerate(chords):
+        points = np.array([positions[id_to_index[id(p)]] for p in chord])
+        chord_data.append({
+            'points': points,
+            'center': np.mean(points, axis=0),
+            'dir': (points[-1] - points[0]) / np.linalg.norm(points[-1] - points[0]),
+            'size': len(points),
+            'usage_count': 0,
+            'rejected_count': 0
+        })
+
+    centers = np.array([d['center'] for d in chord_data])
+    dirs = np.array([d['dir'] for d in chord_data])
+    sizes = np.array([d['size'] for d in chord_data])
+
+    # Initialize patches with metrics
+    patches = []
+    for seed_idx, cross_idx, dist in seed_crossings:
+        normal = np.cross(dirs[seed_idx], dirs[cross_idx])
+        normal_mag = np.linalg.norm(normal)
+
+        if normal_mag < 0.05:
+            stats.rejected_reasons['angle'] += 1
+            continue
+
+        stats.total_patches_started += 1
+        patches.append({
+            'chords': {seed_idx, cross_idx},
+            'size': sizes[seed_idx] + sizes[cross_idx],
+            'normal': normal / normal_mag,
+            'center': (centers[seed_idx] * sizes[seed_idx] +
+                       centers[cross_idx] * sizes[cross_idx]) /
+                      (sizes[seed_idx] + sizes[cross_idx]),
+            'metrics': PatchMetrics(
+                size=sizes[seed_idx] + sizes[cross_idx],
+                planarity=0.0,
+                compactness=0.0,
+                dir_alignment=abs(np.dot(dirs[seed_idx], dirs[cross_idx])),
+                growth_history=[(seed_idx, 0.0), (cross_idx, 0.0)]
+            )
+        })
+
+    available = np.ones(len(chords), dtype=bool)
+    for p in patches:
+        for idx in p['chords']:
+            available[idx] = False
+            chord_data[idx]['usage_count'] += 1
+
+    # Growth iterations with detailed tracking
+    max_iterations = target_size * 2
+    total_iterations = 0
+
+    for iteration in range(max_iterations):
+        additions = 0
+
+        for patch in patches:
+            if patch['size'] >= target_size:
+                continue
+
+            dists = np.linalg.norm(centers - patch['center'], axis=1)
+            plane_scores = np.abs(np.dot(centers - patch['center'], patch['normal']))
+            dir_align = np.abs(np.dot(dirs, patch['normal']))
+
+            scores = (dists / np.max(dists + 1e-6) +
+                      2.0 * plane_scores / np.max(plane_scores + 1e-6) +
+                      3.0 * dir_align)
+
+            valid_mask = available & (sizes <= (target_size - patch['size']))
+            scores = np.where(valid_mask, scores, np.inf)
+
+            best_idx = np.argmin(scores)
+            if scores[best_idx] == np.inf:
+                stats.rejected_reasons['no_candidates'] += 1
+                continue
+
+            additions += 1
+            available[best_idx] = False
+            patch['chords'].add(best_idx)
+            patch['size'] += sizes[best_idx]
+
+            weight = sizes[best_idx] / patch['size']
+            patch['center'] = ((1 - weight) * patch['center'] +
+                               weight * centers[best_idx])
+
+            # Update metrics
+            patch['metrics'].growth_history.append((best_idx, scores[best_idx]))
+            patch['metrics'].planarity = np.mean(plane_scores[list(patch['chords'])])
+            patch['metrics'].compactness = np.mean(dists[list(patch['chords'])])
+            patch['metrics'].dir_alignment = np.mean([abs(np.dot(dirs[i], patch['normal']))
+                                                      for i in patch['chords']])
+
+            chord_data[best_idx]['usage_count'] += 1
+
+        if additions == 0:
+            break
+
+        total_iterations += 1
+
+    # Collect final statistics
+    completed_patches = [p for p in patches if len(p['chords']) >= 3]
+    stats.patches_completed = len(completed_patches)
+    stats.avg_growth_iterations = total_iterations / len(patches) if patches else 0
+
+    for p in completed_patches:
+        size = len(p['chords'])
+        stats.size_distribution[size] = stats.size_distribution.get(size, 0) + 1
+        stats.planarity_scores.append(p['metrics'].planarity)
+
+    if debug:
+        logging.info(f"Completed patch growth:")
+        logging.info(f"Started: {stats.total_patches_started}, Completed: {stats.patches_completed}")
+        logging.info(f"Size distribution: {stats.size_distribution}")
+        logging.info(f"Average planarity: {np.mean(stats.planarity_scores):.3f}")
+        logging.info(f"Rejected reasons: {stats.rejected_reasons}")
+
+    return [[chords[i] for i in p['chords']] for p in completed_patches], stats

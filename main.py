@@ -54,8 +54,6 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_compon
     scroll = zarr.open(chunk_path, mode="r")
 
     z_start, y_start, x_start = chunk_coords
-
-
     chunk = scroll[
             z_start:z_start + chunk_dims[0],
             y_start:y_start + chunk_dims[1],
@@ -63,10 +61,16 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_compon
             ]
     processed = preprocess(chunk, ISO, sharpen, min_component_size)
 
+    if np.count_nonzero(processed) == 0:
+        raise ValueError("Preprocessing resulted in empty volume")
 
     print("Superclustering ...")
     start_time = time.time()
-    labels, superclusters = snic.run_snic(processed, 2, 2*2*2,min_superpixel_size=2)
+    labels, superclusters = snic.run_snic(processed, 2, 2 * 2 * 2, min_superpixel_size=2)
+
+    if len(superclusters) == 0:
+        raise ValueError("No superclusters generated")
+
     labels[processed == 0] = 0
     print(f"Superclustering completed in {time.time() - start_time:.2f} seconds")
     print(f"got {len(superclusters)} superclusters")
@@ -74,8 +78,6 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_compon
     print("First few superclusters:")
     for sc in superclusters[:5]:
         print(f"pos=({sc.z}, {sc.y}, {sc.x}), c={sc.c}")
-
-
 
     bounding_box = np.array([
         [0, chunk_dims[0]],
@@ -87,39 +89,94 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_compon
         points=superclusters,
         bounds=bounding_box,
         min_length=4,
-        max_length=64,
+        max_length=16,
         num_chords=16384
     )
-    chords = [*zchords, *ychords, *xchords]
+
+    if not (zchords or ychords or xchords):
+        raise ValueError("No chords generated in any direction")
+
     print(f"got {len(zchords)} zchords")
     print(f"got {len(ychords)} ychords")
     print(f"got {len(xchords)} xchords")
-    print(f"got {len(chords)} chords")
+    print(f"got {len(zchords + ychords + xchords)} total chords")
+
+    positions, id_to_index, intensities = chord.initialize_points(superclusters, bounding_box)
+
+    crossings = patch.vectorized_find_crossings(
+        zchords + ychords + xchords,
+        positions,
+        id_to_index,
+        max_distance=16.0
+    )
+    print(f"\nFound {len(crossings)} chord crossings")
+
+    patches, stats = patch.grow_patches_iterative(
+        seed_crossings=crossings,
+        chords=zchords + ychords + xchords,
+        positions=positions,
+        id_to_index=id_to_index,
+        target_size=12
+    )
+
+    print(f"\nGenerated {len(patches)} patches")
+    print("\nPatch growth statistics:")
+    print(f"Started: {stats.total_patches_started}, Completed: {stats.patches_completed}")
+    print(f"Size distribution: {stats.size_distribution}")
+    print(f"Average planarity: {np.mean(stats.planarity_scores):.3f}")
+    print(f"Rejected reasons: {stats.rejected_reasons}")
+
+    length_stats = chord.analyze_chord_lengths(patches, zchords, ychords, xchords, positions, id_to_index)
+    print("\nChord length analysis:")
+    chord.print_length_analysis(length_stats)
+
+    if not patches:
+        print("Warning: No patches generated, falling back to chord visualization")
+        return visualize_chords(zchords, ychords, xchords, positions, id_to_index)
+
+    return process_patches(patches, positions, id_to_index)
 
 
-
-    # Process results (similar to original code)
+def visualize_chords(zchords, ychords, xchords, positions, id_to_index):
+    """Fallback visualization using chords when no patches are generated"""
     all_centroids = []
     all_values = []
-    all_chord_indices = []
-    random.shuffle(chords)
+    all_indices = []
+
+    for i, chord_set in enumerate([zchords, ychords, xchords]):
+        for chord in chord_set:
+            points = [(p.z, p.y, p.x) for p in chord]
+            values = [p.c for p in chord]
+            indices = [i * 100] * len(chord)  # Different color for each direction
+
+            all_centroids.extend(points)
+            all_values.extend(values)
+            all_indices.extend(indices)
+
+    if not all_centroids:
+        raise ValueError("No visualization data available")
+
+    return all_centroids, all_values, all_indices
 
 
-    for chord_idx, chord_ in enumerate(chords):
-        chord_centroids = [(sp.z, sp.y, sp.x) for sp in chord_]
-        chord_values = [sp.c for sp in chord_]
-        chord_indices = [chord_idx % 1024] * len(chord_)
+def process_patches(patches, positions, id_to_index):
+    """Process patches for visualization"""
+    all_centroids = []
+    all_values = []
+    all_patch_indices = []
 
-        all_centroids.extend(chord_centroids)
-        all_values.extend(chord_values)
-        all_chord_indices.extend(chord_indices)
+    for patch_idx, patch in enumerate(patches):
+        for chord in patch:
+            chord_points = [(p.z, p.y, p.x) for p in chord]
+            chord_values = [p.c for p in chord]
+            patch_indices = [patch_idx % 1024] * len(chord)
 
-    numused = len(all_centroids)
-    #all_centroids.extend([(sp.z, sp.y, sp.x) for sp in superclusters])
-    #all_values.extend(sp.c*.5 for sp in superclusters)
-    #all_chord_indices.extend([-1]*(len(all_values)-len(all_chord_indices)))
+            all_centroids.extend(chord_points)
+            all_values.extend(chord_values)
+            all_patch_indices.extend(patch_indices)
 
-    return all_centroids, all_values, all_chord_indices
+    return all_centroids, all_values, all_patch_indices
+
 
 def main():
 

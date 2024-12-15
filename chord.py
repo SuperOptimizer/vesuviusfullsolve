@@ -330,3 +330,67 @@ def get_growth_stats(chords: List[Set]) -> GrowthStats:
         max_length=max(lengths),
         total_points_used=sum(lengths)
     )
+
+
+def analyze_chord_lengths(patches: List[List[Set]],
+                          z_chords: List[Set],
+                          y_chords: List[Set],
+                          x_chords: List[Set],
+                          positions: np.ndarray,
+                          id_to_index: Dict[int, int]) -> Dict:
+    def get_chord_length(chord: Set) -> float:
+        points = np.array([positions[id_to_index[id(p)]] for p in chord])
+        return np.linalg.norm(points[-1] - points[0])
+
+    # Calculate lengths for all chords
+    z_lengths = [get_chord_length(c) for c in z_chords]
+    y_lengths = [get_chord_length(c) for c in y_chords]
+    x_lengths = [get_chord_length(c) for c in x_chords]
+
+    # Analyze which chords ended up in patches
+    used_chords = set()
+    for patch in patches:
+        for chord in patch:
+            used_chords.add(id(chord))
+
+    z_used = [c for c in z_chords if id(c) in used_chords]
+    y_used = [c for c in y_chords if id(c) in used_chords]
+    x_used = [c for c in x_chords if id(c) in used_chords]
+
+    z_used_lengths = [get_chord_length(c) for c in z_used]
+    y_used_lengths = [get_chord_length(c) for c in y_used]
+    x_used_lengths = [get_chord_length(c) for c in x_used]
+
+    return {
+        'z_stats': {
+            'total': len(z_chords),
+            'used': len(z_used),
+            'avg_length': np.mean(z_lengths),
+            'used_avg_length': np.mean(z_used_lengths) if z_used_lengths else 0,
+            'length_hist': np.histogram(z_lengths, bins=10)[0].tolist()
+        },
+        'y_stats': {
+            'total': len(y_chords),
+            'used': len(y_used),
+            'avg_length': np.mean(y_lengths),
+            'used_avg_length': np.mean(y_used_lengths) if y_used_lengths else 0,
+            'length_hist': np.histogram(y_lengths, bins=10)[0].tolist()
+        },
+        'x_stats': {
+            'total': len(x_chords),
+            'used': len(x_used),
+            'avg_length': np.mean(x_lengths),
+            'used_avg_length': np.mean(x_used_lengths) if x_used_lengths else 0,
+            'length_hist': np.histogram(x_lengths, bins=10)[0].tolist()
+        }
+    }
+
+
+def print_length_analysis(stats: Dict):
+    for dir_name, dir_stats in stats.items():
+        print(f"\n{dir_name}:")
+        print(f"Total chords: {dir_stats['total']}")
+        print(f"Used in patches: {dir_stats['used']} ({dir_stats['used'] / dir_stats['total'] * 100:.1f}%)")
+        print(f"Average length: {dir_stats['avg_length']:.2f}")
+        print(f"Average length of used chords: {dir_stats['used_avg_length']:.2f}")
+        print("Length distribution:", dir_stats['length_hist'])
