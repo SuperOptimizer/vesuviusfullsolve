@@ -4,11 +4,26 @@ from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QSl
 from PyQt5.QtCore import Qt
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 import sys
+
+
 def visualize_volume(centroids, values, patch_indices, r, g, b, d_seed):
+    # Convert centroids to numpy array if not already
+    centroids = np.array(centroids)
+
+    # Calculate the midpoint of the volume
+    max_coords = np.max(centroids, axis=0)
+    min_coords = np.min(centroids, axis=0)
+    midpoint = (max_coords + min_coords) / 2
+
+    # Center the coordinates by subtracting the midpoint
+    centered_centroids = centroids - midpoint
+
+    # Create and show the viewer with centered coordinates
     app = QApplication.instance() or QApplication(sys.argv)
-    viewer = VolumeViewer(centroids, values, patch_indices, r, g, b, d_seed)
+    viewer = VolumeViewer(centered_centroids, values, patch_indices, r, g, b, d_seed)
     viewer.show()
     app.exec_()
+
 
 class VolumeViewer(QMainWindow):
     def __init__(self, centroids, values, patch_indices, r, g, b, d_seed):
@@ -45,13 +60,13 @@ class VolumeViewer(QMainWindow):
 
         # Set initial points and scalars
         max_coord = np.max(np.abs(self.centroids))
-        scaled_points = self.centroids / max_coord * 99
+        scale_factor = 99 / max_coord if max_coord > 0 else 1
+        scaled_points = self.centroids * scale_factor
 
         for i, (point, value) in enumerate(zip(scaled_points, self.normalized_base)):
-            # Rearrange the point coordinates to match VTK's coordinate system (x, y, z)
-            # Your data is in (z, y, x) order, so we need to swap z and x
+            # Points are already centered, just need to swap z and x for VTK
             z, y, x = point
-            self.points.InsertNextPoint(x, y, z)  # VTK expects (x, y, z)
+            self.points.InsertNextPoint(x, y, z)
             self.radius_scalars.InsertNextValue(value)
             self.colors_vtk.InsertNextTuple3(
                 int(self.r[i]),
@@ -99,8 +114,9 @@ class VolumeViewer(QMainWindow):
 
         # Add lighting
         point_light = vtk.vtkLight()
-        point_light.SetPosition(127.5, 127.5, 500)
-        point_light.SetFocalPoint(127.5, 127.5, 127.5)
+        # Update light position for centered coordinates
+        point_light.SetPosition(0, 0, 100)  # Light from above
+        point_light.SetFocalPoint(0, 0, 0)  # Focus on center
         point_light.SetIntensity(0.5)
         point_light.SetColor(1, 1, 1)
         point_light.SetConeAngle(180)
@@ -167,10 +183,12 @@ class VolumeViewer(QMainWindow):
 
         if len(valid_centroids) > 0:
             max_coord = np.max(np.abs(valid_centroids))
-            scaled_points = valid_centroids / max_coord * 99
+            scale_factor = 99 / max_coord if max_coord > 0 else 1
+            scaled_points = valid_centroids * scale_factor
 
             for i, (point, radius_val) in enumerate(zip(scaled_points, valid_radius)):
-                self.points.InsertNextPoint(point)
+                z, y, x = point  # Swap z and x for VTK
+                self.points.InsertNextPoint(x, y, z)
                 self.radius_scalars.InsertNextValue(radius_val)
                 self.colors_vtk.InsertNextTuple3(
                     int(valid_r[i]),
@@ -189,6 +207,7 @@ class VolumeViewer(QMainWindow):
         self.vtk_widget = QVTKRenderWindowInteractor()
         layout.addWidget(self.vtk_widget)
 
+        # Threshold slider
         self.threshold_slider = QSlider(Qt.Horizontal)
         self.threshold_slider.setMinimum(0)
         self.threshold_slider.setMaximum(100)
@@ -196,6 +215,7 @@ class VolumeViewer(QMainWindow):
         self.threshold_slider.valueChanged.connect(self.update_threshold)
         layout.addWidget(self.threshold_slider)
 
+        # Radius slider
         self.radius_slider = QSlider(Qt.Horizontal)
         self.radius_slider.setMinimum(-100)
         self.radius_slider.setMaximum(100)
