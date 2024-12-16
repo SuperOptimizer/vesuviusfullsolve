@@ -33,9 +33,9 @@ def preprocess(chunk, ISO, sharpen, min_component_size):
     processed = pipeline.apply_chunked_glcae_3d(processed)
     processed = pipeline.segment_and_clean(processed,ISO,ISO+32)
 
-    eroded = skimage.morphology.binary_erosion(processed > 0, footprint=skimage.morphology.ball(1))
-    dilated = skimage.morphology.binary_dilation(eroded > 0, footprint=skimage.morphology.ball(1))
-    processed[~dilated] = 0
+    #eroded = skimage.morphology.binary_erosion(processed > 0, footprint=skimage.morphology.ball(1))
+    #dilated = skimage.morphology.binary_dilation(eroded > 0, footprint=skimage.morphology.ball(16))
+    #processed[~dilated] = 0
 
     #eroded = skimage.morphology.binary_erosion(processed > 0, footprint=skimage.morphology.ball(2))
     #dilated = skimage.morphology.binary_dilation(eroded > 0, footprint=skimage.morphology.ball(1))
@@ -49,16 +49,22 @@ def preprocess(chunk, ISO, sharpen, min_component_size):
     return processed
 
 
-def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_component_size):
+def process_chunk(chunk_path, chunk_coords, chunk_dims, padding, ISO, sharpen, min_component_size):
     print("Reading chunk...")
     scroll = zarr.open(chunk_path, mode="r")
 
     z_start, y_start, x_start = chunk_coords
     chunk = scroll[
-            z_start:z_start + chunk_dims[0],
-            y_start:y_start + chunk_dims[1],
-            x_start:x_start + chunk_dims[2]
+            z_start-padding[0]:z_start + chunk_dims[0] + padding[0]*2,
+            y_start-padding[1]:y_start + chunk_dims[1] + padding[1]*2,
+            x_start-padding[2]:x_start + chunk_dims[2] + padding[2]*2
             ]
+    print(f"getting chunk at z={z_start-padding[0]}:{z_start + chunk_dims[0] + padding[0]*2}")
+    print(f"                 y={y_start-padding[1]}:{y_start + chunk_dims[1] + padding[1]*2}")
+    print(f"                 x={x_start-padding[2]}:{x_start + chunk_dims[2] + padding[2]*2}")
+    print(f"z len = {z_start + chunk_dims[0] + padding[0]*2} ")
+    print(f"y len = {y_start + chunk_dims[1] + padding[1]*2} ")
+    print(f"x len = {x_start + chunk_dims[2] + padding[2]*2} ")
     processed = preprocess(chunk, ISO, sharpen, min_component_size)
     #processed[processed > 0] = 255
     if np.count_nonzero(processed) == 0:
@@ -88,9 +94,9 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_compon
     zpaths, ypaths, xpaths = path.grow_paths_parallel(
         points=superclusters,
         bounds=bounding_box,
-        num_paths=65536,  # Reduced number for longer paths
-        min_length=32,  # Increased minimum length
-        max_length=128
+        num_paths=32768,  # Reduced number for longer paths
+        min_length=8,  # Increased minimum length
+        max_length=256
     )
 
     return visualize_paths(zpaths,[],[])
@@ -196,12 +202,13 @@ def main():
     snic.compile_snic('./c/snic.c','./libsnic.so')
 
 
-    chunk_coords=(2048, 2048, 2048)
-    chunk_dims=(256,256,256)
+    padding = (8,8,8)
+    chunk_coords=(4096, 2048, 2048)
+    chunk_dims=(1024,128,128)
     ISO=32
     sharpen=1
     min_component_size=128
-    centroids, values, all_chord_indices = process_chunk(SCROLL_PATH, chunk_coords, chunk_dims, ISO, sharpen, min_component_size)
+    centroids, values, all_chord_indices = process_chunk(SCROLL_PATH, chunk_coords, chunk_dims, padding,ISO, sharpen, min_component_size)
 
 
     # Prepare colors
