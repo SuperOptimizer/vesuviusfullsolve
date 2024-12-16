@@ -85,14 +85,15 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_compon
         [0, chunk_dims[2]],
     ])
 
-    zpaths, ypaths, xpaths = path.grow_fiber_paths(
+    zpaths, ypaths, xpaths = path.grow_paths_parallel(
         points=superclusters,
         bounds=bounding_box,
-        num_paths=1024,  # Reduced number for longer paths
-        min_length=32  # Increased minimum length
+        num_paths=16384,  # Reduced number for longer paths
+        min_length=32,  # Increased minimum length
+        max_length=256
     )
 
-    return visualize_paths(zpaths,ypaths,xpaths)
+    return visualize_paths(zpaths,[],[])
 
     zchords, ychords, xchords = chord.grow_fiber_chords(
         points=superclusters,
