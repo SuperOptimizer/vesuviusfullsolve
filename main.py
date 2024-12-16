@@ -88,9 +88,9 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_compon
     zpaths, ypaths, xpaths = path.grow_paths_parallel(
         points=superclusters,
         bounds=bounding_box,
-        num_paths=16384,  # Reduced number for longer paths
+        num_paths=65536,  # Reduced number for longer paths
         min_length=32,  # Increased minimum length
-        max_length=256
+        max_length=128
     )
 
     return visualize_paths(zpaths,[],[])
