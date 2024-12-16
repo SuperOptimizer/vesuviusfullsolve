@@ -15,7 +15,7 @@ from pathlib import Path
 import metrics
 import chord
 import render
-import patch
+import path
 
 def preprocess(chunk, ISO, sharpen, min_component_size):
 
@@ -33,9 +33,9 @@ def preprocess(chunk, ISO, sharpen, min_component_size):
     processed = pipeline.apply_chunked_glcae_3d(processed)
     processed = pipeline.segment_and_clean(processed,ISO,ISO+32)
 
-    #eroded = skimage.morphology.binary_erosion(processed > 0, footprint=skimage.morphology.ball(1))
-    #dilated = skimage.morphology.binary_dilation(eroded > 0, footprint=skimage.morphology.ball(2))
-    #processed[~dilated] = 0
+    eroded = skimage.morphology.binary_erosion(processed > 0, footprint=skimage.morphology.ball(1))
+    dilated = skimage.morphology.binary_dilation(eroded > 0, footprint=skimage.morphology.ball(1))
+    processed[~dilated] = 0
 
     #eroded = skimage.morphology.binary_erosion(processed > 0, footprint=skimage.morphology.ball(2))
     #dilated = skimage.morphology.binary_dilation(eroded > 0, footprint=skimage.morphology.ball(1))
@@ -60,13 +60,13 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_compon
             x_start:x_start + chunk_dims[2]
             ]
     processed = preprocess(chunk, ISO, sharpen, min_component_size)
-
+    #processed[processed > 0] = 255
     if np.count_nonzero(processed) == 0:
         raise ValueError("Preprocessing resulted in empty volume")
 
     print("Superclustering ...")
     start_time = time.time()
-    labels, superclusters = snic.run_snic(processed, 2, 2 * 2 * 2, min_superpixel_size=2)
+    labels, superclusters = snic.run_snic(processed, 2, 1, min_superpixel_size=2)
 
     if len(superclusters) == 0:
         raise ValueError("No superclusters generated")
@@ -85,13 +85,25 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_compon
         [0, chunk_dims[2]],
     ])
 
+    zpaths, ypaths, xpaths = path.grow_fiber_paths(
+        points=superclusters,
+        bounds=bounding_box,
+        num_paths=1024,  # Reduced number for longer paths
+        min_length=32  # Increased minimum length
+    )
+
+    return visualize_paths(zpaths,ypaths,xpaths)
+
     zchords, ychords, xchords = chord.grow_fiber_chords(
         points=superclusters,
         bounds=bounding_box,
         min_length=4,
-        max_length=16,
-        num_chords=16384
+        max_length=8,
+        num_chords=32768
     )
+
+
+
 
     if not (zchords or ychords or xchords):
         raise ValueError("No chords generated in any direction")
@@ -102,52 +114,23 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, ISO, sharpen, min_compon
     print(f"got {len(zchords + ychords + xchords)} total chords")
 
     positions, id_to_index, intensities = chord.initialize_points(superclusters, bounding_box)
+    chord.print_length_analysis(chord.analyze_chord_lengths(zchords,ychords,xchords,positions,id_to_index))
 
-    crossings = patch.vectorized_find_crossings(
-        zchords + ychords + xchords,
-        positions,
-        id_to_index,
-        max_distance=16.0
-    )
-    print(f"\nFound {len(crossings)} chord crossings")
-
-    patches, stats = patch.grow_patches_iterative(
-        seed_crossings=crossings,
-        chords=zchords + ychords + xchords,
-        positions=positions,
-        id_to_index=id_to_index,
-        target_size=12
-    )
-
-    print(f"\nGenerated {len(patches)} patches")
-    print("\nPatch growth statistics:")
-    print(f"Started: {stats.total_patches_started}, Completed: {stats.patches_completed}")
-    print(f"Size distribution: {stats.size_distribution}")
-    print(f"Average planarity: {np.mean(stats.planarity_scores):.3f}")
-    print(f"Rejected reasons: {stats.rejected_reasons}")
-
-    length_stats = chord.analyze_chord_lengths(patches, zchords, ychords, xchords, positions, id_to_index)
-    print("\nChord length analysis:")
-    chord.print_length_analysis(length_stats)
-
-    if not patches:
-        print("Warning: No patches generated, falling back to chord visualization")
-        return visualize_chords(zchords, ychords, xchords, positions, id_to_index)
-
-    return process_patches(patches, positions, id_to_index)
+    return visualize_chords(zchords, ychords, xchords)
 
 
-def visualize_chords(zchords, ychords, xchords, positions, id_to_index):
+
+def visualize_chords(zchords, ychords, xchords):
     """Fallback visualization using chords when no patches are generated"""
     all_centroids = []
     all_values = []
     all_indices = []
 
     for i, chord_set in enumerate([zchords, ychords, xchords]):
-        for chord in chord_set:
-            points = [(p.z, p.y, p.x) for p in chord]
-            values = [p.c for p in chord]
-            indices = [i * 100] * len(chord)  # Different color for each direction
+        for j, chord_ in enumerate(chord_set):
+            points = [(p.z, p.y, p.x) for p in chord_]
+            values = [p.c for p in chord_]
+            indices = [j%1024] * len(chord_)
 
             all_centroids.extend(points)
             all_values.extend(values)
@@ -159,24 +142,39 @@ def visualize_chords(zchords, ychords, xchords, positions, id_to_index):
     return all_centroids, all_values, all_indices
 
 
-def process_patches(patches, positions, id_to_index):
-    """Process patches for visualization"""
+def visualize_paths(zpaths, ypaths, xpaths):
+    """Visualize the longer continuous paths with different colors for each direction"""
     all_centroids = []
     all_values = []
-    all_patch_indices = []
+    all_indices = []
 
-    for patch_idx, patch in enumerate(patches):
-        for chord in patch:
-            chord_points = [(p.z, p.y, p.x) for p in chord]
-            chord_values = [p.c for p in chord]
-            patch_indices = [patch_idx % 1024] * len(chord)
+    # Assign different base indices for each direction to create distinct color ranges
+    direction_offsets = {
+        'z': 0,  # Will use viridis colormap
+        'y': 256,  # Will use magma colormap
+        'x': 512  # Will use inferno colormap
+    }
 
-            all_centroids.extend(chord_points)
-            all_values.extend(chord_values)
-            all_patch_indices.extend(patch_indices)
+    for direction, paths in [('z', zpaths), ('y', ypaths), ('x', xpaths)]:
+        base_idx = direction_offsets[direction]
 
-    return all_centroids, all_values, all_patch_indices
+        for i, path in enumerate(paths):
+            # Ensure we don't exceed color index limits
+            path_idx = base_idx + (i % 256)
 
+            # Extract points from path
+            points = [(p.z, p.y, p.x) for p in path]
+            values = [p.c for p in path]
+            indices = [path_idx] * len(path)
+
+            all_centroids.extend(points)
+            all_values.extend(values)
+            all_indices.extend(indices)
+
+    if not all_centroids:
+        raise ValueError("No visualization data available")
+
+    return all_centroids, all_values, all_indices
 
 def main():
 
