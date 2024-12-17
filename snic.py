@@ -217,6 +217,7 @@ def run_snic(
 
     if empty_count > 0:
         warnings.warn(f"Found {empty_count} empty superpixels")
+    print(f"returning {len(superpixel_list)} superpixels")
 
     return labels, superpixel_list
 

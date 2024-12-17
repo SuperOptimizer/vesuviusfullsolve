@@ -60,9 +60,9 @@ def process_chunk(cluster_vol, chunk_path, chunk_coords, chunk_dims, padding, IS
             y_start-padding[1]:y_start + chunk_dims[1] + padding[1]*2,
             x_start-padding[2]:x_start + chunk_dims[2] + padding[2]*2
             ]
-    print(f"getting chunk at z={z_start-padding[0]}:{z_start + chunk_dims[0] + padding[0]*2}")
-    print(f"                 y={y_start-padding[1]}:{y_start + chunk_dims[1] + padding[1]*2}")
-    print(f"                 x={x_start-padding[2]}:{x_start + chunk_dims[2] + padding[2]*2}")
+    print(f"getting chunk at z={z_start-padding[0]}:{z_start + chunk_dims[0] + padding[0]}")
+    print(f"                 y={y_start-padding[1]}:{y_start + chunk_dims[1] + padding[1]}")
+    print(f"                 x={x_start-padding[2]}:{x_start + chunk_dims[2] + padding[2]}")
     print(f"z len = {chunk_dims[0] + padding[0]*2} ")
     print(f"y len = {chunk_dims[1] + padding[1]*2} ")
     print(f"x len = {chunk_dims[2] + padding[2]*2} ")

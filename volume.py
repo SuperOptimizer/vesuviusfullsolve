@@ -22,7 +22,7 @@ class ClusterVolume:
         else:
             self.root = zarr.open(zarr_path, mode=mode)
 
-    def write_superclusters(self, superclusters, chunk_indices):
+    def write_superclusters(self, superclusters, chunk_indices, padding=(0,0,0)):
         """
         Write supercluster data to the zarr array at the specified chunk location.
 
@@ -30,7 +30,7 @@ class ClusterVolume:
         superclusters: List[Superpixel] - output from run_snic
         chunk_indices: tuple(int, int, int) - (z_idx, y_idx, x_idx) indices of the chunk
         """
-        print(f"writing {len(superclusters)} to {chunk_indices}")
+        print(f"writing {len(superclusters)} superclusters to {chunk_indices}")
         z_idx, y_idx, x_idx = chunk_indices
 
         # Create array to hold the supercluster data
@@ -45,9 +45,9 @@ class ClusterVolume:
 
             # Pack z,y,x,c,n into the array
             data[i] = [
-                sc.z,
-                sc.y,
-                sc.x,
+                sc.z - padding[0],
+                sc.y - padding[1],
+                sc.x - padding[2],
                 sc.c,
                 sc.n
             ]
