@@ -2,6 +2,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 from typing import Tuple, List, Optional
 from dataclasses import dataclass
+import numpy as np
+from scipy.spatial import cKDTree
+from typing import List, Union, Tuple
+import numpy.typing as npt
+
 
 import snic
 @dataclass
@@ -181,3 +186,43 @@ def analyze_superpixel_movement(volume: np.ndarray, d_seed: int = 8, compactness
     # Generate plots
     for plot_type in ['magnitude', 'vectors', 'heatmap']:
         plot_drift_analysis(drift_metrics, volume.shape, plot_type)
+
+
+def find_min_centroid_distance(centroids: Union[List[Tuple[float, float, float]], npt.NDArray[np.float32]]) -> float:
+    """
+    Calculate the minimum distance between any two centroids in a list of 3D points.
+
+    Args:
+        centroids: List of (z,y,x) coordinates or numpy array of shape (N, 3)
+
+    Returns:
+        float: Minimum distance between any two centroids
+
+    Raises:
+        ValueError: If fewer than 2 centroids are provided
+
+    Notes:
+        Uses KDTree for efficient nearest neighbor computation, making it suitable
+        for large numbers of centroids. Complexity is O(n log n) instead of O(n²).
+    """
+    # Convert input to numpy array if it isn't already
+    points = np.asarray(centroids, dtype=np.float32)
+
+    if points.shape[0] < 2:
+        raise ValueError("Need at least 2 centroids to compute minimum distance")
+
+    if points.shape[1] != 3:
+        raise ValueError("Each centroid must have exactly 3 coordinates (z,y,x)")
+
+    # Build KD-tree for efficient nearest neighbor search
+    tree = cKDTree(points)
+
+    # Find distances to nearest neighbor for each point
+    # k=2 because each point's closest neighbor is itself (distance 0)
+    distances, _ = tree.query(points, k=2)
+
+    # Get the second-smallest distance for each point (smallest non-zero distance)
+    min_distances = distances[:, 1]
+
+    # Return the smallest of these distances
+    return float(np.min(min_distances))

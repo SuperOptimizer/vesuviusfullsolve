@@ -16,26 +16,27 @@ import metrics
 import chord
 import render
 import path
+import volume
 
 def preprocess(chunk, ISO, sharpen, min_component_size):
 
     print("Processing chunk...")
     processed = np.ascontiguousarray(chunk)
     mask = processed < ISO
-    processed = skimage.filters.gaussian(processed, sigma=0.25)
-    blurred = skimage.filters.gaussian(processed, sigma=0.5)
+    processed = skimage.filters.gaussian(processed, sigma=1).astype(np.float32)
+    blurred = skimage.filters.gaussian(processed, sigma=2).astype(np.float32)
     unsharp_mask = processed - blurred
     processed = processed + sharpen * unsharp_mask
     processed = (processed - np.min(processed)) / (np.max(processed) - np.min(processed))
-    processed = skimage.exposure.equalize_adapthist(processed,nbins=256,kernel_size=256)
+    processed = skimage.exposure.equalize_hist(processed,nbins=256).astype(np.float32)
     processed = (processed*255).astype(np.uint8)
     processed[mask] = 0
     processed = pipeline.apply_chunked_glcae_3d(processed)
     processed = pipeline.segment_and_clean(processed,ISO,ISO+32)
 
-    #eroded = skimage.morphology.binary_erosion(processed > 0, footprint=skimage.morphology.ball(1))
-    #dilated = skimage.morphology.binary_dilation(eroded > 0, footprint=skimage.morphology.ball(16))
-    #processed[~dilated] = 0
+    eroded = skimage.morphology.binary_erosion(processed > 0, footprint=skimage.morphology.ball(1))
+    dilated = skimage.morphology.binary_dilation(eroded > 0, footprint=skimage.morphology.ball(1))
+    processed[~dilated] = 0
 
     #eroded = skimage.morphology.binary_erosion(processed > 0, footprint=skimage.morphology.ball(2))
     #dilated = skimage.morphology.binary_dilation(eroded > 0, footprint=skimage.morphology.ball(1))
@@ -49,7 +50,7 @@ def preprocess(chunk, ISO, sharpen, min_component_size):
     return processed
 
 
-def process_chunk(chunk_path, chunk_coords, chunk_dims, padding, ISO, sharpen, min_component_size):
+def process_chunk(cluster_vol, chunk_path, chunk_coords, chunk_dims, padding, ISO, sharpen, min_component_size, d_seed, compactness):
     print("Reading chunk...")
     scroll = zarr.open(chunk_path, mode="r")
 
@@ -62,9 +63,9 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, padding, ISO, sharpen, m
     print(f"getting chunk at z={z_start-padding[0]}:{z_start + chunk_dims[0] + padding[0]*2}")
     print(f"                 y={y_start-padding[1]}:{y_start + chunk_dims[1] + padding[1]*2}")
     print(f"                 x={x_start-padding[2]}:{x_start + chunk_dims[2] + padding[2]*2}")
-    print(f"z len = {z_start + chunk_dims[0] + padding[0]*2} ")
-    print(f"y len = {y_start + chunk_dims[1] + padding[1]*2} ")
-    print(f"x len = {x_start + chunk_dims[2] + padding[2]*2} ")
+    print(f"z len = {chunk_dims[0] + padding[0]*2} ")
+    print(f"y len = {chunk_dims[1] + padding[1]*2} ")
+    print(f"x len = {chunk_dims[2] + padding[2]*2} ")
     processed = preprocess(chunk, ISO, sharpen, min_component_size)
     #processed[processed > 0] = 255
     if np.count_nonzero(processed) == 0:
@@ -72,7 +73,18 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, padding, ISO, sharpen, m
 
     print("Superclustering ...")
     start_time = time.time()
-    labels, superclusters = snic.run_snic(processed, 2, 1, min_superpixel_size=2)
+    labels, superclusters = snic.run_snic(processed, d_seed, compactness, min_superpixel_size=2)
+
+    # Calculate chunk indices based on the chunk coordinates
+    z_idx = z_start // 128
+    y_idx = y_start // 128
+    x_idx = x_start // 128
+
+    # Write the superclusters
+    cluster_vol.write_superclusters(superclusters, (z_idx, y_idx, x_idx))
+
+    centroids = [(sp.z,sp.y,sp.x) for sp in superclusters]
+    print(f"smallest distance between 2 superpixels: {metrics.find_min_centroid_distance(centroids)}")
 
     if len(superclusters) == 0:
         raise ValueError("No superclusters generated")
@@ -94,7 +106,7 @@ def process_chunk(chunk_path, chunk_coords, chunk_dims, padding, ISO, sharpen, m
     zpaths, ypaths, xpaths = path.grow_paths_parallel(
         points=superclusters,
         bounds=bounding_box,
-        num_paths=32768,  # Reduced number for longer paths
+        num_paths=4096,  # Reduced number for longer paths
         min_length=8,  # Increased minimum length
         max_length=256
     )
@@ -187,11 +199,11 @@ def main():
 
     # Set up paths
     # keep if commented out
-    SCROLL_PATH = Path("/Users/forrest/dl.ash2txt.org/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/1")
+    #SCROLL_PATH = Path("/Users/forrest/dl.ash2txt.org/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/1")
     #SCROLL_PATH = Path("/Users/forrest/dl.ash2txt.org/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/")
-    #SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/0")
+    SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/0")
     #SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll1/PHercParis4.volpkg/volumes_zarr_standardized/54keV_7.91um_Scroll1A.zarr/0")
-
+    ZARR_PATH = "/Volumes/vesuvius/clusters.zarr"
     OUTPUT_DIR = Path("output")
 
     # Ensure output directory exists
@@ -201,14 +213,26 @@ def main():
     supervoxeler.compile_supervoxeler()
     snic.compile_snic('./c/snic.c','./libsnic.so')
 
-
-    padding = (8,8,8)
-    chunk_coords=(4096, 2048, 2048)
-    chunk_dims=(1024,128,128)
-    ISO=32
+    #the cluster volume stores the superclusters as z y x point spheres with a color and size
+    cluster_vol = volume.ClusterVolume(ZARR_PATH,'w',True)
+    #we pad this many voxels on either side of the chunk in order to have good cluster coverage over the entire volume
+    #so that we can follow chords and paths outside of one chunk into another one easier
+    padding = (4,4,4)
+    #the z y x of where to start in the volume
+    chunk_coords=(2048, 3072, 4096)
+    #the z y x dimensions of the chunk of data we're looking at
+    chunk_dims=(128,128,128)
+    #ISO for the standard zarr volume. multiple of 8 as standard zarr volumes zero out the low 3 bits
+    ISO=8
+    #unsharp masking multiplier
     sharpen=1
-    min_component_size=128
-    centroids, values, all_chord_indices = process_chunk(SCROLL_PATH, chunk_coords, chunk_dims, padding,ISO, sharpen, min_component_size)
+    #min amount of adjacent voxels to consider as matter and not noise
+    min_component_size=8
+    # how much we seed superpixels when, e.g. every 2 z y or x values. SHOULD BE 2!!! probably wont work with any other value
+    d_seed = 2
+    #how compact the superpixeling should be. should be around ~128 to give superpixel of max size=255
+    compactness = 128
+    centroids, values, all_chord_indices = process_chunk(cluster_vol, SCROLL_PATH, chunk_coords, chunk_dims, padding,ISO, sharpen, min_component_size, d_seed, compactness)
 
 
     # Prepare colors

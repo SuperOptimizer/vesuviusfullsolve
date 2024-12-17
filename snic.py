@@ -16,6 +16,7 @@ class Superpixel_ctype(ctypes.Structure):
     ]
 
 class Superpixel:
+    __slots__ = ("z",'y','x','c','n','connections')
     """Python class representing a superpixel with its properties."""
 
     def __init__(self, z: float, y: float, x: float, c: float, n: int, connections: dict = None):
@@ -150,6 +151,12 @@ def run_snic(
 
     max_connections=64
 
+    max_n = 0
+    max_z = 0
+    max_y = 0
+    max_x = 0
+    max_c = 0
+
     empty_count = 0
     for i in range(1, max_superpixels):  # Skip index 0
         sp = superpixels[i]
@@ -158,10 +165,28 @@ def run_snic(
                 sp.z, sp.y, sp.x, sp.c, sp.n,
                 connections={}
             )
+            if sp.n > max_n:
+                max_n = sp.n
+            if sp.z > max_z:
+                max_z = sp.z
+            if sp.y > max_y:
+                max_y = sp.y
+            if sp.x > max_x:
+                max_x = sp.x
+            if sp.c > max_c:
+                max_c = sp.c
             superpixel_list.append(new_superpixel)
             label_to_superpixel[i] = new_superpixel
         else:
             empty_count += 1
+
+    print(f"max superpixel size {max_n}")
+    print(f"max superpixel val {max_c}")
+    print(f"max superpixel z {max_z}")
+    print(f"max superpixel y {max_y}")
+    print(f"max superpixel x {max_x}")
+    if max_n > 255:
+        raise Exception(f"cant have superpixels more than 255 voxels large. got one {max_n} length. increase compactness to snic to fix")
 
     # Second pass: Add connections using Superpixel object references
     # Modified second pass to keep top N connections
