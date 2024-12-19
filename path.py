@@ -1,6 +1,3 @@
-
-
-
 import numpy as np
 from scipy.spatial import cKDTree
 from typing import Set, Dict, List, Tuple, Optional, NamedTuple, Literal
@@ -11,6 +8,10 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import numba
 from numba import jit, prange
+
+MAX_PATHS=8192
+MIN_PATH_LENGTH=8
+MAX_PATH_LENGTH=128
 
 '''
 

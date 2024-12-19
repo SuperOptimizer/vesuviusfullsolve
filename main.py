@@ -22,6 +22,8 @@ import path
 import volume
 import vis
 
+from numcodecs import Blosc
+
 def preprocess(chunk, ISO, sharpen, min_component_size):
 
     print("Processing chunk...")
@@ -55,7 +57,7 @@ def preprocess(chunk, ISO, sharpen, min_component_size):
 
 
 
-def process_chunk(scroll_zarr, fiber_zarr, cluster_zarr, segment_zarr, z, y, x, dims, padding, ISO, sharpen, min_component_size, d_seed, compactness):
+def process_chunk(scroll_zarr, fiber_zarr, cluster_zarr, chord_zarr, segment_zarr, z, y, x, dims, padding, ISO, sharpen, min_component_size, d_seed, compactness):
     slice_ = (
         slice(z - padding[0], z + dims[0] + padding[0]),
         slice(y - padding[1], y + dims[1] + padding[1]),
@@ -83,30 +85,40 @@ def process_chunk(scroll_zarr, fiber_zarr, cluster_zarr, segment_zarr, z, y, x, 
         points=superclusters,
         bounds=bounding_box,
         axis=0,
-        num_paths=4096,  # Reduced number for longer paths
-        min_length=8,  # Increased minimum length
-        max_length=256
+        num_paths=path.MAX_PATHS,  # Reduced number for longer paths
+        min_length=path.MIN_PATH_LENGTH,  # Increased minimum length
+        max_length=path.MAX_PATH_LENGTH
     )
     print(f"got {len(zpaths)} zpaths")
-    if len(zpaths) == 0:
-        return
+    if len(zpaths) > 0:
+        path_data = volume.paths_to_numpy(zpaths, superclusters, path.MAX_PATHS, path.MAX_PATH_LENGTH)
+        chord_zarr[z//128,y//128,x//128] = path_data
 
-    centroids, values, indices =   vis.visualize_paths(zpaths,[],[])
-    r,g,b =colorize(centroids,indices)
-    render.visualize_volume(centroids, values, indices, r, g, b, 2)
-
-
-
+        centroids, values, indices = vis.visualize_paths(zpaths, [], [])
+        r, g, b = colorize(centroids, indices)
+        render.visualize_volume(centroids, values, indices, r, g, b, 2)
 
 
 
-def do_all_superpixeling(scroll_path, fiber_path, cluster_path, segment_path):
-    scroll_zarr = zarr.open(scroll_path, mode="r")
-    fiber_zarr = zarr.open(fiber_path, mode="r")
+def do_all_superpixeling(scroll_path, fiber_path, cluster_path, chord_path, segment_path):
+
+    scroll_synchronizer = zarr.ProcessSynchronizer("/Volumes/vesuvius/scroll1a_volume.sync")
+    fiber_synchronizer = zarr.ProcessSynchronizer("/Volumes/vesuvius/scroll1a_fiber.sync")
+    cluster_synchronizer = zarr.ProcessSynchronizer("/Volumes/vesuvius/scroll1a_cluster.sync")
+    chord_synchronizer = zarr.ProcessSynchronizer("/Volumes/vesuvius/scroll1a_chord.sync")
+    segment_synchronizer = zarr.ProcessSynchronizer("/Volumes/vesuvius/scroll1a_segment.sync")
+
+    compressor = Blosc(cname='blosclz', clevel=9)
+
+    scroll_zarr = zarr.open(scroll_path, mode="r",compressor=compressor,synchronizer=scroll_synchronizer)
+    fiber_zarr = zarr.open(fiber_path, mode="r",compressor=compressor,synchronizer=fiber_synchronizer)
     cluster_zarr = zarr.open(cluster_path,mode='w',
                              shape=(113, 63, 64, 64 * 64 * 64, 5),
-                            chunks=(1, 1, 1, 64 * 64 * 64, 5))
-    segment_zarr = zarr.open(segment_path, mode="w", shape=scroll_zarr.shape,chunks=scroll_zarr.chunks)
+                            chunks=(1, 1, 1, 64 * 64 * 64, 5),compressor=compressor,synchronizer=cluster_synchronizer)
+    chord_zarr = zarr.open(chord_path,mode='w',
+                             shape=(113, 63, 64, path.MAX_PATHS, path.MAX_PATH_LENGTH),
+                            chunks=(1, 1, 1, path.MAX_PATHS, path.MAX_PATH_LENGTH),compressor=compressor,synchronizer=chord_synchronizer)
+    segment_zarr = zarr.open(segment_path, mode="w", shape=scroll_zarr.shape,chunks=scroll_zarr.chunks,compressor=compressor,synchronizer=segment_synchronizer)
 
     #dimensions of the chunk
     dims = (128,128,128)
@@ -116,7 +128,7 @@ def do_all_superpixeling(scroll_path, fiber_path, cluster_path, segment_path):
     padding = (4, 4, 4)
 
     # ISO for the standard zarr volume. multiple of 8 as standard zarr volumes zero out the low 3 bits
-    ISO = 64
+    ISO = 16
 
     # unsharp masking multiplier
     sharpen = 1
@@ -134,7 +146,7 @@ def do_all_superpixeling(scroll_path, fiber_path, cluster_path, segment_path):
     for z in range(2048,scroll_zarr.shape[0]-1024,dims[0]):
         for y in range(2048, scroll_zarr.shape[1]-1024, dims[1]):
             for x in range(2048, scroll_zarr.shape[2]-1024, dims[2]):
-                process_chunk(scroll_zarr,fiber_zarr,cluster_zarr,segment_zarr,z,y,x,dims,padding,ISO,sharpen,min_component_size,d_seed,compactness)
+                process_chunk(scroll_zarr, fiber_zarr, cluster_zarr, chord_zarr, segment_zarr, z, y, x, dims, padding, ISO, sharpen, min_component_size, d_seed, compactness)
 
 
 def colorize(centroids, all_chord_indices):
@@ -204,7 +216,7 @@ def main():
     print("Compiling Code...")
     supervoxeler.compile_supervoxeler()
     snic.compile_snic('./c/snic.c','./libsnic.so')
-    do_all_superpixeling(SCROLL_PATH, FIBER_SCROLL1, CLUSTER_PATH, SEGMENT_PATH)
+    do_all_superpixeling(SCROLL_PATH, FIBER_SCROLL1, CLUSTER_PATH, CHORD_PATH, SEGMENT_PATH)
 
     # Visualize results
     print("Visualizing results...")
