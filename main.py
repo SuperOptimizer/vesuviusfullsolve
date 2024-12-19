@@ -23,6 +23,9 @@ import path
 import volume
 import vis
 
+#NUM_WORKERS = max(1, multiprocessing.cpu_count() - 1)
+NUM_WORKERS = 1
+
 from numcodecs import Blosc
 
 def preprocess(chunk, ISO, sharpen, min_component_size):
@@ -166,11 +169,10 @@ def do_all_superpixeling(scroll_path, fiber_path, cluster_path, chord_path, segm
     ]
 
     # Use number of CPU cores minus 1 to avoid overloading
-    num_workers = max(1, multiprocessing.cpu_count() - 1)
-    print(f"Processing {len(chunk_coords)} chunks using {num_workers} workers")
+    print(f"Processing {len(chunk_coords)} chunks using {NUM_WORKERS} workers")
 
     # Process chunks in parallel
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+    with ProcessPoolExecutor(max_workers=NUM_WORKERS) as executor:
         # Submit all tasks and create a map of futures to their chunk coordinates
         future_to_coords = {
             executor.submit(process_chunk_wrapper, args): (args[5], args[6], args[7])  # z,y,x coords
