@@ -7,9 +7,10 @@ import zarr
 import numpy as np
 import zarr
 import time
-
+import multiprocessing
 from conda.common.serialize import yaml_safe_dump
-
+from concurrent.futures import ProcessPoolExecutor
+import concurrent.futures
 import pipeline
 import supervoxeler
 import snic
@@ -55,7 +56,14 @@ def preprocess(chunk, ISO, sharpen, min_component_size):
 
     return processed
 
-
+def process_chunk_wrapper(args):
+    """Wrapper function to unpack arguments for process_chunk"""
+    (scroll_zarr, fiber_zarr, cluster_zarr, chord_zarr, segment_zarr,
+     z, y, x, dims, padding, ISO, sharpen, min_component_size, d_seed, compactness) = args
+    return process_chunk(
+        scroll_zarr, fiber_zarr, cluster_zarr, chord_zarr, segment_zarr,
+        z, y, x, dims, padding, ISO, sharpen, min_component_size, d_seed, compactness
+    )
 
 def process_chunk(scroll_zarr, fiber_zarr, cluster_zarr, chord_zarr, segment_zarr, z, y, x, dims, padding, ISO, sharpen, min_component_size, d_seed, compactness):
     slice_ = (
@@ -94,9 +102,9 @@ def process_chunk(scroll_zarr, fiber_zarr, cluster_zarr, chord_zarr, segment_zar
         path_data = volume.paths_to_numpy(zpaths, superclusters, path.MAX_PATHS, path.MAX_PATH_LENGTH)
         chord_zarr[z//128,y//128,x//128] = path_data
 
-        centroids, values, indices = vis.visualize_paths(zpaths, [], [])
-        r, g, b = colorize(centroids, indices)
-        render.visualize_volume(centroids, values, indices, r, g, b, 2)
+        #centroids, values, indices = vis.visualize_paths(zpaths, [], [])
+        #r, g, b = colorize(centroids, indices)
+        #render.visualize_volume(centroids, values, indices, r, g, b, 2)
 
 
 
@@ -142,11 +150,44 @@ def do_all_superpixeling(scroll_path, fiber_path, cluster_path, chord_path, segm
     # how compact the superpixeling should be. should be around ~256 to give superpixel of max size around 255
     compactness = 256
 
-    #TODO: fix this to use the last and first blocks in each direction since we're just skipping them for now
-    for z in range(2048,scroll_zarr.shape[0]-1024,dims[0]):
+
+    # Generate all chunk coordinates
+    chunk_coords = []
+    for z in range(2048, scroll_zarr.shape[0]-1024, dims[0]):
         for y in range(2048, scroll_zarr.shape[1]-1024, dims[1]):
             for x in range(2048, scroll_zarr.shape[2]-1024, dims[2]):
-                process_chunk(scroll_zarr, fiber_zarr, cluster_zarr, chord_zarr, segment_zarr, z, y, x, dims, padding, ISO, sharpen, min_component_size, d_seed, compactness)
+                chunk_coords.append((z, y, x))
+
+    # Prepare arguments for each chunk
+    chunk_args = [
+        (scroll_zarr, fiber_zarr, cluster_zarr, chord_zarr, segment_zarr,
+         z, y, x, dims, padding, ISO, sharpen, min_component_size, d_seed, compactness)
+        for z, y, x in chunk_coords
+    ]
+
+    # Use number of CPU cores minus 1 to avoid overloading
+    num_workers = max(1, multiprocessing.cpu_count() - 1)
+    print(f"Processing {len(chunk_coords)} chunks using {num_workers} workers")
+
+    # Process chunks in parallel
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        # Submit all tasks and create a map of futures to their chunk coordinates
+        future_to_coords = {
+            executor.submit(process_chunk_wrapper, args): (args[5], args[6], args[7])  # z,y,x coords
+            for args in chunk_args
+        }
+
+        # Process completed futures as they finish
+        for future in concurrent.futures.as_completed(future_to_coords):
+            z, y, x = future_to_coords[future]
+            try:
+                future.result()  # Will raise exception if task failed
+                print(f"Successfully processed chunk at {z},{y},{x}")
+            except Exception as e:
+                print(f"Chunk at {z},{y},{x} failed with error: {str(e)}")
+                # Optionally log the full traceback
+                import traceback
+                print(f"Full traceback:\n{traceback.format_exc()}")
 
 
 def colorize(centroids, all_chord_indices):
