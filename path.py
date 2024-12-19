@@ -12,7 +12,26 @@ from concurrent.futures import ThreadPoolExecutor
 import numba
 from numba import jit, prange
 
+'''
 
+    bounding_box = np.array([
+        [0, dims[0]],
+        [0, dims[1]],
+        [0, dims[2]],
+    ])
+
+    zpaths = path.grow_paths_parallel(
+        points=superclusters,
+        bounds=bounding_box,
+        axis=0,
+        num_paths=4096,  # Reduced number for longer paths
+        min_length=8,  # Increased minimum length
+        max_length=256
+    )
+
+    return vis.visualize_paths(zpaths,[],[])
+
+'''
 
 @dataclass
 class ActivePath:
@@ -153,7 +172,7 @@ def grow_path_segment(path: ActivePath,
                       min_bounds: np.ndarray,
                       max_bounds: np.ndarray,
                       max_length: int) -> bool:
-    """Grow path with strong directional bias"""
+    """Grow path with strong directional bias, maintaining spatial ordering"""
     if not path.is_active or path.point_count >= max_length:
         path.is_active = False
         return False
@@ -186,11 +205,27 @@ def grow_path_segment(path: ActivePath,
     if next_idx >= 0:
         if path.point_count >= len(path.points):
             new_points = np.empty(min(len(path.points) * 2, max_length), dtype=np.int32)
-            new_points[:path.point_count] = path.points[:path.point_count]
+            if path.grow_direction > 0:
+                # For positive direction, copy existing points to start
+                new_points[:path.point_count] = path.points[:path.point_count]
+            else:
+                # For negative direction, copy existing points to end of new array
+                new_start = len(new_points) - path.point_count
+                new_points[new_start:] = path.points[:path.point_count]
             path.points = new_points
-        path.points[path.point_count] = next_idx
-        path.point_count += 1
 
+        if path.grow_direction > 0:
+            # Growing towards positive infinity - append
+            path.points[path.point_count] = next_idx
+        else:
+            # Growing towards negative infinity - prepend by shifting
+            # First, shift existing points right by 1
+            for i in range(path.point_count - 1, -1, -1):
+                path.points[i + 1] = path.points[i]
+            # Then add new point at beginning
+            path.points[0] = next_idx
+
+        path.point_count += 1
         available[next_idx] = False
         next_pos = positions[next_idx]
 
@@ -202,120 +237,118 @@ def grow_path_segment(path: ActivePath,
     path.is_active = False
     return False
 
-
 def grow_paths_parallel(points: List,
-                        bounds: npt.NDArray[np.float32],
-                        num_paths: int = 512,
-                        min_length: int = 8,
-                        max_length: int = 100) -> Tuple[List[Set], List[Set], List[Set]]:
-    """Volume-based seeding with strong directional growth"""
+                       bounds: npt.NDArray[np.float32],
+                       axis: int,  # New parameter: 0 for z, 1 for y, 2 for x
+                       num_paths: int = 512,
+                       min_length: int = 8,
+                       max_length: int = 100) -> List[Set]:
+    """Volume-based seeding with strong directional growth along a single specified axis"""
     (positions, id_to_index, intensities,
      connection_indices, connection_strengths, connection_counts) = initialize_points(points, bounds)
 
-    paths_per_direction = num_paths // 6  # Divide paths among 6 directions (± x, y, z)
+    paths_per_direction = num_paths // 2  # Divide paths between positive and negative directions
     available = np.ones(len(points), dtype=bool)
     min_bounds = bounds[:, 0] + 0.1
     max_bounds = bounds[:, 1] - 0.2
 
-    # Initialize active paths
-    active_paths: List[List[ActivePath]] = [[], [], []]
+    # Initialize active paths for the specified axis
+    active_paths: List[ActivePath] = []
 
-    # Volume-based seeding for each axis and direction
-    for axis in range(3):
-        valid_points = np.array(list(range(len(points))))
+    # Volume-based seeding for the specified axis
+    valid_points = np.array(list(range(len(points))))
 
-        # Create mask for points well within bounds
-        volume_mask = ((positions[:, 0] >= min_bounds[0] + 0.2) &
-                       (positions[:, 0] <= max_bounds[0] - 0.2) &
-                       (positions[:, 1] >= min_bounds[1] + 0.2) &
-                       (positions[:, 1] <= max_bounds[1] - 0.2) &
-                       (positions[:, 2] >= min_bounds[2] + 0.2) &
-                       (positions[:, 2] <= max_bounds[2] - 0.2))
+    # Create mask for points well within bounds
+    volume_mask = ((positions[:, 0] >= min_bounds[0] + 0.2) &
+                   (positions[:, 0] <= max_bounds[0] - 0.2) &
+                   (positions[:, 1] >= min_bounds[1] + 0.2) &
+                   (positions[:, 1] <= max_bounds[1] - 0.2) &
+                   (positions[:, 2] >= min_bounds[2] + 0.2) &
+                   (positions[:, 2] <= max_bounds[2] - 0.2))
 
-        valid_volume_points = valid_points[volume_mask]
+    valid_volume_points = valid_points[volume_mask]
 
-        if len(valid_volume_points) > 0:
-            # Seed points for positive direction
-            pos_seed_indices = np.random.choice(
-                valid_volume_points,
-                size=min(paths_per_direction, len(valid_volume_points)),
-                replace=False
+    if len(valid_volume_points) > 0:
+        # Seed points for positive direction
+        pos_seed_indices = np.random.choice(
+            valid_volume_points,
+            size=min(paths_per_direction, len(valid_volume_points)),
+            replace=False
+        )
+
+        for seed_idx in pos_seed_indices:
+            if not available[seed_idx]:
+                continue
+
+            seed_pos = positions[seed_idx]
+            ideal_dir = np.zeros(3, dtype=np.float32)
+            ideal_dir[axis] = 1.0
+
+            path = ActivePath(
+                points=np.empty(100, dtype=np.int32),
+                point_count=1,
+                front_idx=seed_idx,
+                back_idx=seed_idx,
+                axis=axis,
+                front_pos=seed_pos,
+                back_pos=seed_pos,
+                front_dir=ideal_dir,
+                back_dir=ideal_dir,
+                grow_direction=1  # Positive direction
             )
+            path.points[0] = seed_idx
+            active_paths.append(path)
+            available[seed_idx] = False
 
-            for seed_idx in pos_seed_indices:
-                if not available[seed_idx]:
-                    continue
+        # Seed points for negative direction
+        neg_seed_indices = np.random.choice(
+            valid_volume_points[available[valid_volume_points]],  # Only choose from still-available points
+            size=min(paths_per_direction, np.sum(available[valid_volume_points])),
+            replace=False
+        )
 
-                seed_pos = positions[seed_idx]
-                ideal_dir = np.zeros(3, dtype=np.float32)
-                ideal_dir[axis] = 1.0
+        for seed_idx in neg_seed_indices:
+            if not available[seed_idx]:
+                continue
 
-                path = ActivePath(
-                    points=np.empty(100, dtype=np.int32),
-                    point_count=1,
-                    front_idx=seed_idx,
-                    back_idx=seed_idx,
-                    axis=axis,
-                    front_pos=seed_pos,
-                    back_pos=seed_pos,
-                    front_dir=ideal_dir,
-                    back_dir=ideal_dir,
-                    grow_direction=1  # Positive direction
-                )
-                path.points[0] = seed_idx
-                active_paths[axis].append(path)
-                available[seed_idx] = False
+            seed_pos = positions[seed_idx]
+            ideal_dir = np.zeros(3, dtype=np.float32)
+            ideal_dir[axis] = -1.0
 
-            # Seed points for negative direction
-            neg_seed_indices = np.random.choice(
-                valid_volume_points[available[valid_volume_points]],  # Only choose from still-available points
-                size=min(paths_per_direction, np.sum(available[valid_volume_points])),
-                replace=False
+            path = ActivePath(
+                points=np.empty(100, dtype=np.int32),
+                point_count=1,
+                front_idx=seed_idx,
+                back_idx=seed_idx,
+                axis=axis,
+                front_pos=seed_pos,
+                back_pos=seed_pos,
+                front_dir=ideal_dir,
+                back_dir=ideal_dir,
+                grow_direction=-1  # Negative direction
             )
-
-            for seed_idx in neg_seed_indices:
-                if not available[seed_idx]:
-                    continue
-
-                seed_pos = positions[seed_idx]
-                ideal_dir = np.zeros(3, dtype=np.float32)
-                ideal_dir[axis] = -1.0
-
-                path = ActivePath(
-                    points=np.empty(100, dtype=np.int32),
-                    point_count=1,
-                    front_idx=seed_idx,
-                    back_idx=seed_idx,
-                    axis=axis,
-                    front_pos=seed_pos,
-                    back_pos=seed_pos,
-                    front_dir=ideal_dir,
-                    back_dir=ideal_dir,
-                    grow_direction=-1  # Negative direction
-                )
-                path.points[0] = seed_idx
-                active_paths[axis].append(path)
-                available[seed_idx] = False
+            path.points[0] = seed_idx
+            active_paths.append(path)
+            available[seed_idx] = False
 
     # Growth phase
     with ThreadPoolExecutor() as executor:
         while True:
             futures = []
-            for axis_paths in active_paths:
-                for path in axis_paths:
-                    if path.is_active:
-                        futures.append(executor.submit(
-                            grow_path_segment,
-                            path,
-                            positions,
-                            connection_indices,
-                            connection_strengths,
-                            connection_counts,
-                            available,
-                            min_bounds,
-                            max_bounds,
-                            max_length
-                        ))
+            for path in active_paths:
+                if path.is_active:
+                    futures.append(executor.submit(
+                        grow_path_segment,
+                        path,
+                        positions,
+                        connection_indices,
+                        connection_strengths,
+                        connection_counts,
+                        available,
+                        min_bounds,
+                        max_bounds,
+                        max_length
+                    ))
 
             if not futures:
                 break
@@ -328,11 +361,10 @@ def grow_paths_parallel(points: List,
                 break
 
     # Convert to final format
-    final_paths = [[], [], []]
-    for axis in range(3):
-        for path in active_paths[axis]:
-            if min_length <= path.point_count <= max_length:
-                point_set = {points[idx] for idx in path.points[:path.point_count]}
-                final_paths[axis].append(point_set)
+    final_paths = []
+    for path in active_paths:
+        if min_length <= path.point_count <= max_length:
+            point_set = {points[idx] for idx in path.points[:path.point_count]}
+            final_paths.append(point_set)
 
-    return final_paths[0], final_paths[1], final_paths[2]
+    return final_paths

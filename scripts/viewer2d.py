@@ -102,7 +102,7 @@ class ScrollViewer(QMainWindow):
 
         # Print coordinates after updating image
         x, y = self.get_image_coordinates()
-        print(f"Frame: {self.current_index}, X: {x}, Y: {y}")
+        print(f"Z: {self.current_index}, Y: {y}, X: {x}")
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_W:
@@ -119,8 +119,8 @@ class ScrollViewer(QMainWindow):
 
 
 if __name__ == "__main__":
-    SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll1/PHercParis4.volpkg/volumes_zarr_standardized/54keV_7.91um_Scroll1B.zarr/0")
-
+    #SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll1/PHercParis4.volpkg/volumes_zarr_standardized/54keV_7.91um_Scroll1A.zarr/0")
+    SCROLL_PATH = "/Volumes/vesuvius/scroll1a_fibers/s1-surface-erode.zarr"
     app = QApplication(sys.argv)
     viewer = ScrollViewer(SCROLL_PATH, chunk_size=16)
     viewer.show()

@@ -87,7 +87,6 @@ def run_snic(
         compactness: float = 40.0, min_superpixel_size=1
 ) -> Tuple[np.ndarray, List[Superpixel]]:
     """Run SNIC superpixel segmentation on a 3D volume."""
-    # ... (previous input validation code remains the same) ...
 
     lz,ly,lx = volume.shape
 
@@ -186,7 +185,7 @@ def run_snic(
     print(f"max superpixel y {max_y}")
     print(f"max superpixel x {max_x}")
     if max_n > 255:
-        raise Exception(f"cant have superpixels more than 255 voxels large. got one {max_n} length. increase compactness to snic to fix")
+        print(f"more than superpixels more than 255 voxels large. got one {max_n} length. increase compactness to snic to get smaller superpixels")
 
     # Second pass: Add connections using Superpixel object references
     # Modified second pass to keep top N connections
@@ -216,7 +215,8 @@ def run_snic(
     lib.free_superpixel_connections(connections, max_superpixels - 1)
 
     if empty_count > 0:
-        warnings.warn(f"Found {empty_count} empty superpixels")
+        print(f"Found {empty_count} empty superpixels")
+
     print(f"returning {len(superpixel_list)} superpixels")
 
     return labels, superpixel_list
