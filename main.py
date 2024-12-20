@@ -24,7 +24,7 @@ import path
 import volume
 import vis
 
-NUM_WORKERS = max(1, multiprocessing.cpu_count() - 1)
+NUM_WORKERS = max(1, multiprocessing.cpu_count() - 2)
 #NUM_WORKERS = 1
 
 from numcodecs import Blosc
@@ -53,21 +53,16 @@ def preprocess(chunk, ISO, sharpen, min_component_size):
     #dilated = skimage.morphology.binary_dilation(eroded > 0, footprint=skimage.morphology.ball(1))
     #processed[~dilated] = 0
 
-    binary = processed > 0
-    labeled = skimage.measure.label(binary, connectivity=3)
-    cleaned = skimage.morphology.remove_small_objects(labeled, min_size=min_component_size)
-    processed[cleaned == 0] = 0
+    #binary = processed > 0
+    #labeled = skimage.measure.label(binary, connectivity=3)
+    #cleaned = skimage.morphology.remove_small_objects(labeled, min_size=min_component_size)
+    #processed[cleaned == 0] = 0
 
     return processed
 
 def process_chunk_wrapper(args):
     """Wrapper function to unpack arguments for process_chunk"""
-    (scroll_zarr, fiber_zarr, cluster_zarr, chord_zarr, segment_zarr,
-     z, y, x, dims, padding, ISO, sharpen, min_component_size, d_seed, compactness) = args
-    return process_chunk(
-        scroll_zarr, fiber_zarr, cluster_zarr, chord_zarr, segment_zarr,
-        z, y, x, dims, padding, ISO, sharpen, min_component_size, d_seed, compactness
-    )
+    return process_chunk(*args)
 
 def process_chunk(scroll_zarr, fiber_zarr, cluster_zarr, chord_zarr, segment_zarr, z, y, x, dims, padding, ISO, sharpen, min_component_size, d_seed, compactness):
     if os.path.exists(f"{cluster_zarr.store.path}/{z//128}.{y//128}.{x//128}.0.0"):
@@ -79,14 +74,15 @@ def process_chunk(scroll_zarr, fiber_zarr, cluster_zarr, chord_zarr, segment_zar
         slice(x - padding[2], x + dims[2] + padding[2])
     )
     fiber_chunk = fiber_zarr[slice_]
-    scroll_chunk = scroll_zarr[slice_]
     if np.all(fiber_chunk == 0):
         print(f"skipping chunk at {z},{y},{x} because no fiber")
         return
 
-    print(f"processing chunk at {z},{y},{x}")
+    scroll_chunk = scroll_zarr[slice_]
 
+    print(f"preprocessing chunk at {z},{y},{x}")
     scroll_chunk_processed = preprocess(scroll_chunk, ISO, sharpen, min_component_size)
+    print("running snic")
     labels, superclusters = snic.run_snic(scroll_chunk_processed, d_seed, compactness, min_superpixel_size=2)
     print(f"writing supercluster chunk list to {z//128},{y//128},{x//128}")
     cluster_zarr[z//128,y//128,x//128] = volume.superclusters_to_numpy(superclusters)
@@ -148,7 +144,7 @@ def do_all_superpixeling(output_dir, scroll_path, fiber_path, cluster_path, chor
     sharpen = 1
 
     # min amount of adjacent voxels to consider as matter and not noise
-    min_component_size = 4
+    min_component_size = 2
 
     # how much we seed superpixels when, e.g. every 2 z y or x values. SHOULD BE 2!!! probably wont work with any other value
     d_seed = 2
@@ -163,6 +159,7 @@ def do_all_superpixeling(output_dir, scroll_path, fiber_path, cluster_path, chor
         for y in range(128, scroll_zarr.shape[1], dims[1]):
             for x in range(128, scroll_zarr.shape[2], dims[2]):
                 chunk_coords.append((z, y, x))
+
 
     # Prepare arguments for each chunk
     chunk_args = [
