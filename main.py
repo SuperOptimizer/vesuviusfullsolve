@@ -15,6 +15,7 @@ import pipeline
 import supervoxeler
 import snic
 from pathlib import Path
+import os
 
 import metrics
 import chord
@@ -23,8 +24,8 @@ import path
 import volume
 import vis
 
-#NUM_WORKERS = max(1, multiprocessing.cpu_count() - 1)
-NUM_WORKERS = 1
+NUM_WORKERS = max(1, multiprocessing.cpu_count() - 1)
+#NUM_WORKERS = 1
 
 from numcodecs import Blosc
 
@@ -69,6 +70,9 @@ def process_chunk_wrapper(args):
     )
 
 def process_chunk(scroll_zarr, fiber_zarr, cluster_zarr, chord_zarr, segment_zarr, z, y, x, dims, padding, ISO, sharpen, min_component_size, d_seed, compactness):
+    if os.path.exists(f"{cluster_zarr.store.path}/{z//128}.{y//128}.{x//128}.0.0"):
+        print(f"skipping chunk at {z},{y},{x} because it already exists")
+        return
     slice_ = (
         slice(z - padding[0], z + dims[0] + padding[0]),
         slice(y - padding[1], y + dims[1] + padding[1]),
@@ -79,6 +83,7 @@ def process_chunk(scroll_zarr, fiber_zarr, cluster_zarr, chord_zarr, segment_zar
     if np.all(fiber_chunk == 0):
         print(f"skipping chunk at {z},{y},{x} because no fiber")
         return
+
     print(f"processing chunk at {z},{y},{x}")
 
     scroll_chunk_processed = preprocess(scroll_chunk, ISO, sharpen, min_component_size)
@@ -111,26 +116,24 @@ def process_chunk(scroll_zarr, fiber_zarr, cluster_zarr, chord_zarr, segment_zar
 
 
 
-def do_all_superpixeling(scroll_path, fiber_path, cluster_path, chord_path, segment_path):
+def do_all_superpixeling(output_dir, scroll_path, fiber_path, cluster_path, chord_path, segment_path, mask_path):
 
-    scroll_synchronizer = zarr.ProcessSynchronizer("/Volumes/vesuvius/scroll1a_volume.sync")
-    fiber_synchronizer = zarr.ProcessSynchronizer("/Volumes/vesuvius/scroll1a_fiber.sync")
-    cluster_synchronizer = zarr.ProcessSynchronizer("/Volumes/vesuvius/scroll1a_cluster.sync")
-    chord_synchronizer = zarr.ProcessSynchronizer("/Volumes/vesuvius/scroll1a_chord.sync")
-    segment_synchronizer = zarr.ProcessSynchronizer("/Volumes/vesuvius/scroll1a_segment.sync")
+    cluster_synchronizer = zarr.ProcessSynchronizer(f"{output_dir}/scroll1a_cluster.sync")
+    chord_synchronizer = zarr.ProcessSynchronizer(f"{output_dir}/scroll1a_chord.sync")
+    segment_synchronizer = zarr.ProcessSynchronizer(f"{output_dir}/scroll1a_segment.sync")
+    mask_synchronizer = zarr.ProcessSynchronizer(f"{output_dir}/scroll1a_mask.sync")
 
     compressor = Blosc(cname='blosclz', clevel=9)
 
-    scroll_zarr = zarr.open(scroll_path, mode="r",compressor=compressor,synchronizer=scroll_synchronizer)
-    fiber_zarr = zarr.open(fiber_path, mode="r",compressor=compressor,synchronizer=fiber_synchronizer)
-    cluster_zarr = zarr.open(cluster_path,mode='w',
+    scroll_zarr = zarr.open(scroll_path, mode="r",compressor=compressor)
+    fiber_zarr = zarr.open(fiber_path, mode="r",compressor=compressor)
+    cluster_zarr = zarr.open(cluster_path,mode='a',
                              shape=(113, 63, 64, 64 * 64 * 64, 5),
                             chunks=(1, 1, 1, 64 * 64 * 64, 5),compressor=compressor,synchronizer=cluster_synchronizer)
-    chord_zarr = zarr.open(chord_path,mode='w',
+    chord_zarr = zarr.open(chord_path,mode='a',
                              shape=(113, 63, 64, path.MAX_PATHS, path.MAX_PATH_LENGTH),
                             chunks=(1, 1, 1, path.MAX_PATHS, path.MAX_PATH_LENGTH),compressor=compressor,synchronizer=chord_synchronizer)
-    segment_zarr = zarr.open(segment_path, mode="w", shape=scroll_zarr.shape,chunks=scroll_zarr.chunks,compressor=compressor,synchronizer=segment_synchronizer)
-
+    segment_zarr = zarr.open(segment_path, mode="a", shape=scroll_zarr.shape,chunks=scroll_zarr.chunks,compressor=compressor,synchronizer=segment_synchronizer,dtype="u1")
     #dimensions of the chunk
     dims = (128,128,128)
 
@@ -156,9 +159,9 @@ def do_all_superpixeling(scroll_path, fiber_path, cluster_path, chord_path, segm
 
     # Generate all chunk coordinates
     chunk_coords = []
-    for z in range(2048, scroll_zarr.shape[0]-1024, dims[0]):
-        for y in range(2048, scroll_zarr.shape[1]-1024, dims[1]):
-            for x in range(2048, scroll_zarr.shape[2]-1024, dims[2]):
+    for z in range(128, scroll_zarr.shape[0], dims[0]):
+        for y in range(128, scroll_zarr.shape[1], dims[1]):
+            for x in range(128, scroll_zarr.shape[2], dims[2]):
                 chunk_coords.append((z, y, x))
 
     # Prepare arguments for each chunk
@@ -240,6 +243,8 @@ def colorize(centroids, all_chord_indices):
 
 def main():
 
+    OUTPUT_DIR = Path("/Volumes/vesuvius/output")
+
     # Set up paths
     # keep if commented out
     #SCROLL_PATH = Path("/Users/forrest/dl.ash2txt.org/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/1")
@@ -247,11 +252,11 @@ def main():
     SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll5/PHerc172.volpkg/volumes_zarr_standardized/53keV_7.91um_Scroll5.zarr/0")
     FIBER_SCROLL1 = Path("/Volumes/vesuvius/scroll1a_fibers/s1-surface-erode.zarr")
     #SCROLL_PATH = Path("/Volumes/vesuvius/dl.ash2txt.org/data/full-scrolls/Scroll1/PHercParis4.volpkg/volumes_zarr_standardized/54keV_7.91um_Scroll1A.zarr/0")
-    CLUSTER_PATH = "/Volumes/vesuvius/scroll1a_clusters.zarr"
-    SEGMENT_PATH = "/Volumes/vesuvius/scroll1a_segments.zarr"
-    CHORD_PATH = "/Volumes/vesuvius/scroll1a_chords.zarr"
+    CLUSTER_PATH = f"{OUTPUT_DIR}/scroll1a_clusters.zarr"
+    SEGMENT_PATH = f"{OUTPUT_DIR}/scroll1a_segments.zarr"
+    CHORD_PATH = f"{OUTPUT_DIR}/scroll1a_chords.zarr"
+    MASK_PATH = f"{OUTPUT_DIR}/scroll1a_mask.zarr"
 
-    OUTPUT_DIR = Path("output")
 
     # Ensure output directory exists
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -259,7 +264,7 @@ def main():
     print("Compiling Code...")
     supervoxeler.compile_supervoxeler()
     snic.compile_snic('./c/snic.c','./libsnic.so')
-    do_all_superpixeling(SCROLL_PATH, FIBER_SCROLL1, CLUSTER_PATH, CHORD_PATH, SEGMENT_PATH)
+    do_all_superpixeling(OUTPUT_DIR, SCROLL_PATH, FIBER_SCROLL1, CLUSTER_PATH, CHORD_PATH, SEGMENT_PATH, MASK_PATH)
 
     # Visualize results
     print("Visualizing results...")
